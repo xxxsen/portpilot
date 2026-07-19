@@ -17,7 +17,8 @@ func TestLifecyclePersistsFinalCounters(t *testing.T) {
 	service, err := New(database, Config{
 		SampleInterval: 5 * time.Millisecond, CleanupInterval: time.Hour,
 		AuditRetention: time.Hour, NetworkRetention: time.Hour,
-		SampleRetention: time.Hour, MaxActive: 2,
+		SampleRetention: time.Hour, StatisticsRetention: time.Hour,
+		FineRollupRetention: time.Hour, MaxActive: 2,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +65,8 @@ func TestActiveLimitRejectsWithoutLeakingRegistry(t *testing.T) {
 	service, err := New(database, Config{
 		SampleInterval: time.Hour, CleanupInterval: time.Hour,
 		AuditRetention: time.Hour, NetworkRetention: time.Hour,
-		SampleRetention: time.Hour, MaxActive: 1,
+		SampleRetention: time.Hour, StatisticsRetention: time.Hour,
+		FineRollupRetention: time.Hour, MaxActive: 1,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +94,8 @@ func TestSnapshotReportsLatestTransferRates(t *testing.T) {
 	service, err := New(database, Config{
 		SampleInterval: time.Hour, CleanupInterval: time.Hour,
 		AuditRetention: time.Hour, NetworkRetention: time.Hour,
-		SampleRetention: time.Hour, MaxActive: 1,
+		SampleRetention: time.Hour, StatisticsRetention: time.Hour,
+		FineRollupRetention: time.Hour, MaxActive: 1,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +123,60 @@ func TestSnapshotReportsLatestTransferRates(t *testing.T) {
 	service.Close()
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBackfillAggregatesInterruptedConnection(t *testing.T) {
+	t.Parallel()
+	database, err := store.Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Hour).UnixMilli()
+	if err := database.CreateNetworkConnection(t.Context(), store.NetworkConnection{
+		ActivityID: "00000000000000000000000000000101",
+		Protocol:   "tcp", State: "active", ClientID: "client", ProxyID: "proxy",
+		ExternalAddr: "10.0.0.5:5000",
+		AcceptedAt:   now, LastActivityAt: now + 1000, UpBytes: 50, DownBytes: 75,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := database.InterruptOpenConnections(t.Context(), now+2000); err != nil || count != 1 {
+		t.Fatalf("interrupt count=%d error=%v", count, err)
+	}
+	service, err := New(database, Config{
+		SampleInterval: time.Hour, CleanupInterval: time.Hour,
+		AuditRetention: time.Hour, NetworkRetention: time.Hour,
+		SampleRetention: time.Hour, StatisticsRetention: 90 * 24 * time.Hour,
+		FineRollupRetention: 48 * time.Hour, MaxActive: 10,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		service.Close()
+		_ = database.Close()
+	})
+	deadline := time.Now().Add(time.Second)
+	for {
+		meta, metaErr := service.AnalyticsMeta(t.Context())
+		if metaErr == nil && meta.Status == "ready" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backfill did not become ready: meta=%#v error=%v", meta, metaErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	overview, err := database.NetworkAnalyticsOverview(t.Context(), store.AnalyticsQuery{
+		From: now, To: now + time.Hour.Milliseconds(),
+		BaseResolution: store.AnalyticsHourlyResolutionSeconds, OutputResolution: 3600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Connections != 1 || overview.UpBytes != 50 || overview.DownBytes != 75 {
+		t.Fatalf("interrupted connection was not backfilled: %#v", overview)
 	}
 }
 

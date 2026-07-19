@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -213,7 +215,8 @@ func TestNetworkConnectionsSeparateActiveAndHistory(t *testing.T) {
 	activityService, err := activity.New(database, activity.Config{
 		SampleInterval: time.Hour, CleanupInterval: time.Hour,
 		AuditRetention: time.Hour, NetworkRetention: time.Hour,
-		SampleRetention: time.Hour, MaxActive: 10,
+		SampleRetention: time.Hour, StatisticsRetention: time.Hour,
+		FineRollupRetention: time.Hour, MaxActive: 10,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -263,6 +266,412 @@ func TestNetworkConnectionsSeparateActiveAndHistory(t *testing.T) {
 	app.handleNetworkConnections(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("incompatible scope status = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestNetworkAnalyticsAPIIncludesMetadataAndHistoricalData(t *testing.T) {
+	t.Parallel()
+	database, err := store.Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Now().UTC()
+	acceptedAt := now.Add(-30 * time.Minute).UnixMilli()
+	closedAt := now.Add(-20 * time.Minute).UnixMilli()
+	connection := store.NetworkConnection{
+		ActivityID: "00000000000000000000000000000901",
+		Protocol:   "tcp", State: "accepted",
+		ClientID: "client-a", ClientRemark: "Client A",
+		ProxyID: "proxy-a", ProxyRemark: "Proxy A",
+		ExternalAddr: "198.51.100.10:5000", ExternalIP: "198.51.100.10",
+		AcceptedAt: acceptedAt, LastActivityAt: closedAt,
+	}
+	if err := database.CreateNetworkConnection(t.Context(), connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.State = "closed"
+	connection.ClosedAt = &closedAt
+	connection.UpBytes = 1024
+	connection.DownBytes = 2048
+	if _, err := database.FinalizeNetworkConnectionAndAggregate(
+		t.Context(),
+		connection,
+		store.GeoClassification{Kind: "reserved"},
+		closedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.EnsureAnalyticsMeta(t.Context(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateAnalyticsMeta(
+		t.Context(),
+		"ready",
+		now.Add(-90*24*time.Hour).UnixMilli(),
+		1,
+		"",
+		now.UnixMilli(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Config: config.DefaultServerConfig(), Events: database}
+	request := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"/api/network/analytics/overview?range=1h",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	app.handleNetworkAnalyticsOverview(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("analytics overview status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Range struct {
+			Requested         string `json:"requested"`
+			ResolutionSeconds int    `json:"resolution_seconds"`
+		} `json:"range"`
+		Completeness struct {
+			Status       string `json:"status"`
+			CompleteFrom int64  `json:"complete_from"`
+			GeoIPStatus  string `json:"geoip_status"`
+		} `json:"completeness"`
+		Connections int64 `json:"connections"`
+		UpBytes     int64 `json:"up_bytes"`
+		DownBytes   int64 `json:"down_bytes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Range.Requested != "1h" || payload.Range.ResolutionSeconds != 300 ||
+		payload.Completeness.Status != "ready" ||
+		payload.Completeness.GeoIPStatus != "disabled" ||
+		payload.Connections != 1 || payload.UpBytes != 1024 || payload.DownBytes != 2048 {
+		t.Fatalf("unexpected analytics response: %#v body=%s", payload, response.Body.String())
+	}
+
+	backfillFrom := now.Add(-24 * time.Hour).UnixMilli()
+	if err := database.UpdateAnalyticsMeta(
+		t.Context(),
+		"backfilling",
+		backfillFrom,
+		0,
+		"",
+		now.Add(time.Second).UnixMilli(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	app.handleNetworkAnalyticsOverview(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK ||
+		payload.Completeness.Status != "backfilling" ||
+		payload.Completeness.CompleteFrom != backfillFrom {
+		t.Fatalf("backfill metadata response=%d payload=%#v", response.Code, payload.Completeness)
+	}
+	if err := database.UpdateAnalyticsMeta(
+		t.Context(),
+		"degraded",
+		0,
+		0,
+		"busy",
+		now.Add(2*time.Second).UnixMilli(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	app.handleNetworkAnalyticsOverview(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK ||
+		payload.Completeness.Status != "degraded" ||
+		payload.Completeness.CompleteFrom != backfillFrom {
+		t.Fatalf("degraded metadata response=%d payload=%#v", response.Code, payload.Completeness)
+	}
+}
+
+func TestNetworkAnalyticsAPIRejectsInvalidScopeAndIP(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: config.DefaultServerConfig()}
+	for _, test := range []struct {
+		path    string
+		handler http.HandlerFunc
+		code    string
+	}{
+		{
+			path:    "/api/network/analytics/overview?range=24h&proxy_id=proxy",
+			handler: app.handleNetworkAnalyticsOverview,
+			code:    "invalid_scope",
+		},
+		{
+			path:    "/api/network/analytics/ip-series?range=24h&source_ip=invalid",
+			handler: app.handleNetworkAnalyticsIPSeries,
+			code:    "invalid_ip",
+		},
+	} {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, test.path, nil)
+		response := httptest.NewRecorder()
+		test.handler(response, request)
+		if response.Code != http.StatusBadRequest ||
+			!bytes.Contains(response.Body.Bytes(), []byte(`"`+test.code+`"`)) {
+			t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestNetworkAnalyticsAPIRejectsInvalidQueryParameters(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: config.DefaultServerConfig()}
+	for _, test := range []struct {
+		name    string
+		path    string
+		handler http.HandlerFunc
+		code    string
+	}{
+		{
+			name:    "missing custom range",
+			path:    "/api/network/analytics/overview?range=custom",
+			handler: app.handleNetworkAnalyticsOverview,
+			code:    "invalid_range",
+		},
+		{
+			name:    "invalid protocol",
+			path:    "/api/network/analytics/overview?range=24h&protocol=icmp",
+			handler: app.handleNetworkAnalyticsOverview,
+			code:    "invalid_scope",
+		},
+		{
+			name:    "invalid client",
+			path:    "/api/network/analytics/overview?range=24h&client_id=bad%2Fid",
+			handler: app.handleNetworkAnalyticsOverview,
+			code:    "invalid_scope",
+		},
+		{
+			name:    "invalid page size",
+			path:    "/api/network/analytics/dimensions?range=24h&page_size=10",
+			handler: app.handleNetworkAnalyticsDimensions,
+			code:    "invalid_query",
+		},
+		{
+			name:    "invalid sort",
+			path:    "/api/network/analytics/dimensions?range=24h&sort=client_id",
+			handler: app.handleNetworkAnalyticsDimensions,
+			code:    "invalid_query",
+		},
+		{
+			name:    "invalid top k",
+			path:    "/api/network/analytics/top-ips?range=24h&k=21",
+			handler: app.handleNetworkAnalyticsTopIPs,
+			code:    "invalid_query",
+		},
+		{
+			name:    "missing source IP",
+			path:    "/api/network/analytics/ip-series?range=24h",
+			handler: app.handleNetworkAnalyticsIPSeries,
+			code:    "invalid_ip",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, test.path, nil)
+			response := httptest.NewRecorder()
+			test.handler(response, request)
+			if response.Code != http.StatusBadRequest ||
+				!bytes.Contains(response.Body.Bytes(), []byte(`"`+test.code+`"`)) {
+				t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestNetworkAnalyticsAPITimeoutIsStableAndObservable(t *testing.T) {
+	t.Parallel()
+	database, err := store.Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	app := &App{
+		Config:           config.DefaultServerConfig(),
+		Events:           database,
+		analyticsTimeout: time.Nanosecond,
+	}
+	request := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"/api/network/analytics/overview?range=24h",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	app.handleNetworkAnalyticsOverview(response, request)
+	if response.Code != http.StatusServiceUnavailable ||
+		response.Body.String() != "{\"error\":\"activity_store_unavailable\"}\n" {
+		t.Fatalf("timeout response=%d body=%s", response.Code, response.Body.String())
+	}
+	metrics := app.analytics.snapshot()
+	if metrics.Overview.QueryTotal != 1 ||
+		metrics.Overview.QueryTimeoutTotal != 1 ||
+		metrics.Overview.QueryDurationNanos <= 0 {
+		t.Fatalf("timeout metrics=%#v", metrics.Overview)
+	}
+}
+
+func TestNetworkAnalyticsRangesStayBoundedAndAligned(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: config.DefaultServerConfig()}
+	for _, test := range []struct {
+		name       string
+		path       string
+		resolution int
+	}{
+		{name: "one hour", path: "/?range=1h", resolution: 300},
+		{name: "one day", path: "/?range=24h", resolution: 3600},
+		{name: "one week", path: "/?range=7d", resolution: 21600},
+		{name: "one month", path: "/?range=30d", resolution: 86400},
+		{name: "ninety days", path: "/?range=90d", resolution: 86400},
+	} {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, test.path, nil)
+		value, err := app.analyticsRange(request)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if value.ResolutionSeconds != test.resolution ||
+			value.EffectiveFrom >= value.EffectiveTo ||
+			(value.EffectiveTo-value.EffectiveFrom)/(int64(value.ResolutionSeconds)*1000) > 180 {
+			t.Fatalf("%s: unexpected range %#v", test.name, value)
+		}
+	}
+	now := time.Now().UTC().Add(-time.Minute).UnixMilli()
+	from := now - (10 * 24 * time.Hour).Milliseconds()
+	customRequest := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		fmt.Sprintf("/?range=custom&from=%d&to=%d", from, now),
+		nil,
+	)
+	custom, err := app.analyticsRange(customRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	points := (custom.EffectiveTo - custom.EffectiveFrom) /
+		(int64(custom.ResolutionSeconds) * 1000)
+	if points > 180 {
+		t.Fatalf("custom range returned %d points: %#v", points, custom)
+	}
+	tooOld := from - (100 * 24 * time.Hour).Milliseconds()
+	invalid := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		fmt.Sprintf("/?range=custom&from=%d&to=%d", tooOld, now),
+		nil,
+	)
+	if _, err := app.analyticsRange(invalid); !errors.Is(err, errInvalidAnalyticsRange) {
+		t.Fatalf("oversized custom range error=%v", err)
+	}
+}
+
+func TestNetworkAnalyticsRoutesRequireAdmin(t *testing.T) {
+	t.Parallel()
+	app := &App{Admin: NewAdminAuth(nil, 10)}
+	request := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"/api/network/analytics/overview?range=24h",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	app.adminMux().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized ||
+		!bytes.Contains(response.Body.Bytes(), []byte("authentication_required")) {
+		t.Fatalf("unauthenticated analytics response=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestNetworkAnalyticsDimensionsPreserveDeletedHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "clients.json")
+	const token = "01234567890123456789012345678901234567890123"
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf(`{
+		"revision": 1,
+		"client_config": [{
+			"client_id": "client-a",
+			"client_token": %q,
+			"remark": "Current client",
+			"enabled": true,
+			"created_at": 1,
+			"updated_at": 1,
+			"proxy_list": []
+		}]
+	}`, token)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultServerConfig()
+	manager, err := config.NewManager(configPath, cfg.AdminAddr, cfg.ServerAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := store.Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Now().UTC()
+	acceptedAt := now.Add(-20 * time.Minute).UnixMilli()
+	closedAt := now.Add(-10 * time.Minute).UnixMilli()
+	connection := store.NetworkConnection{
+		ActivityID: "00000000000000000000000000000911",
+		Protocol:   "tcp", State: "accepted", ClientID: "client-a",
+		ClientRemark: "Historical client", ProxyID: "deleted-proxy",
+		ProxyRemark: "Deleted proxy", ExternalAddr: "192.0.2.1:5000",
+		ExternalIP: "192.0.2.1", AcceptedAt: acceptedAt, LastActivityAt: closedAt,
+	}
+	if err := database.CreateNetworkConnection(t.Context(), connection); err != nil {
+		t.Fatal(err)
+	}
+	connection.State = "closed"
+	connection.ClosedAt = &closedAt
+	if _, err := database.FinalizeNetworkConnectionAndAggregate(
+		t.Context(),
+		connection,
+		store.GeoClassification{Kind: "reserved"},
+		closedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{Config: cfg, ConfigManager: manager, Events: database}
+	request := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodGet,
+		"/api/network/analytics/dimensions?range=1h&page=1&page_size=25",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	app.handleNetworkAnalyticsDimensions(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("dimension status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			ClientRemark  string `json:"client_remark"`
+			ProxyRemark   string `json:"proxy_remark"`
+			ClientDeleted bool   `json:"client_deleted"`
+			ProxyDeleted  bool   `json:"proxy_deleted"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 ||
+		payload.Items[0].ClientDeleted ||
+		!payload.Items[0].ProxyDeleted ||
+		payload.Items[0].ClientRemark != "Historical client" ||
+		payload.Items[0].ProxyRemark != "Deleted proxy" {
+		t.Fatalf("deleted dimension metadata mismatch: %#v", payload.Items)
 	}
 }
 

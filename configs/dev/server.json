@@ -31,7 +31,7 @@
     },
     "udp": {
       "channels_per_proxy": 2,
-      "flow_idle_timeout": "60s",
+      "flow_idle_timeout": "2s",
       "max_flows_per_proxy": 4096,
       "max_datagram_size": 65507,
       "channel_queue_datagrams": 1024
@@ -59,6 +59,10 @@
     "audit_retention": "4320h",
     "network_retention": "720h",
     "network_sample_retention": "168h",
+    "network_statistics_retention": "2160h",
+    "network_fine_rollup_retention": "48h",
+    "geoip_country_database": "",
+    "geoip_reload_interval": "1h",
     "sample_interval": "10s",
     "cleanup_interval": "1h",
     "max_active_connections": 100000

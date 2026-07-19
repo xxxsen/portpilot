@@ -3,7 +3,14 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NetworkPage } from "@/components/network/network-page";
 import { api } from "@/lib/api";
-import type { NetworkConnection, NetworkSummary, Page } from "@/lib/types";
+import type {
+  AnalyticsOverview,
+  AnalyticsTopIPs,
+  NetworkClient,
+  NetworkConnection,
+  NetworkSummary,
+  Page,
+} from "@/lib/types";
 
 vi.mock("@/lib/api", () => ({api: vi.fn()}));
 vi.mock("recharts", () => ({
@@ -32,6 +39,7 @@ const activeConnection: NetworkConnection = {
   proxy_id: "proxy-a",
   proxy_remark: "SSH",
   external_addr: "192.0.2.10:50000",
+  external_ip: "192.0.2.10",
   server_bind: ":7000",
   target_addr: "10.0.0.2:22",
   transport: "smux",
@@ -62,6 +70,44 @@ const historyConnection: NetworkConnection = {
   rate_window_millis: 0,
 };
 
+const networkClient: NetworkClient = {
+  client_id: "client-a",
+  client_remark: "Client A",
+  enabled: true,
+  online: true,
+  deleted: false,
+  session_epoch: 1,
+  mux_sessions: 1,
+  active_connections: 1,
+  historical_connections: 2,
+  failures: 0,
+  up_bytes: 4096,
+  down_bytes: 8192,
+  last_seen_at: 3000,
+};
+
+const analyticsMetadata = {
+  range: {
+    requested: "24h" as const,
+    effective_from: 0,
+    effective_to: 0,
+    resolution_seconds: 3600,
+    timezone: "UTC" as const,
+  },
+  scope: {client_id: "", proxy_id: "", protocol: ""},
+  completeness: {
+    status: "ready" as const,
+    complete_from: 0,
+    statistics_available_from: 0,
+    statistics_retention_seconds: 7776000,
+    details_available_from: 0,
+    estimated_bytes: 0,
+    estimated_ratio: 0,
+    geoip_status: "disabled" as const,
+    geoip_database_fingerprint: "",
+  },
+};
+
 describe("NetworkPage", () => {
   beforeEach(() => {
     window.history.replaceState(null, "", "/");
@@ -89,23 +135,115 @@ describe("NetworkPage", () => {
         return pageOf(historyConnection);
       }
       if (path.startsWith("/api/network/clients")) {
-        return pageOf();
+        return pageOf(networkClient);
+      }
+      if (path.startsWith("/api/network/analytics/overview")) {
+        return {
+          ...analyticsMetadata,
+          connections: 2,
+          failures: 0,
+          failure_rate: 0,
+          unique_ips: 1,
+          countries: 0,
+          up_bytes: 4096,
+          down_bytes: 8192,
+          estimated_bytes: 0,
+          series: [],
+          country_distribution: [{
+            geo_kind: "reserved",
+            country_code: "",
+            connections: 2,
+            unique_ips: 1,
+            up_bytes: 4096,
+            down_bytes: 8192,
+            traffic_share: 1,
+          }],
+        } satisfies AnalyticsOverview;
+      }
+      if (path.startsWith("/api/network/analytics/dimensions")) {
+        return {
+          ...analyticsMetadata,
+          items: [{
+            client_id: "client-a",
+            client_remark: "Client A",
+            client_deleted: false,
+            proxy_id: "proxy-a",
+            proxy_remark: "SSH",
+            proxy_deleted: false,
+            protocol: "tcp",
+            connections: 2,
+            failures: 0,
+            unique_ips: 1,
+            countries: 0,
+            up_bytes: 4096,
+            down_bytes: 8192,
+            top_country_code: "",
+            first_seen_at: 1000,
+            last_seen_at: 3000,
+          }],
+          page: 1,
+          page_size: 25,
+          total: 1,
+          total_pages: 1,
+        };
+      }
+      if (path.startsWith("/api/network/analytics/top-ips")) {
+        const item = {
+          rank: 1,
+          source_ip: "192.0.2.10",
+          geo_kind: "reserved",
+          country_code: "",
+          connections: 2,
+          failures: 0,
+          up_bytes: 4096,
+          down_bytes: 8192,
+          connection_share: 1,
+          traffic_share: 1,
+          first_seen_at: 1000,
+          last_seen_at: 3000,
+        };
+        return {
+          ...analyticsMetadata,
+          by_connections: [item],
+          by_traffic: [item],
+        } satisfies AnalyticsTopIPs;
+      }
+      if (path.startsWith("/api/network/analytics/ip-series")) {
+        return {
+          ...analyticsMetadata,
+          source_ip: "192.0.2.10",
+          geo_kind: "reserved",
+          country_code: "",
+          connections: 2,
+          failures: 0,
+          up_bytes: 4096,
+          down_bytes: 8192,
+          first_seen_at: 1000,
+          last_seen_at: 3000,
+          series: [],
+        };
       }
       throw new Error(`unexpected API path: ${path}`);
     });
   });
 
-  it("switches between stable live and historical connection panels", async () => {
+  it("opens on historical insights and keeps connection details inside the page", async () => {
     render(<NetworkPage onUnauthorized={vi.fn()} />);
 
+    expect(await screen.findByRole("heading", {name: "历史指标"})).toBeInTheDocument();
+    expect(screen.getAllByText("查看数据表")).toHaveLength(2);
+    expect(screen.queryByRole("heading", {name: "实时连接"})).not.toBeInTheDocument();
+    expect(vi.mocked(api)).not.toHaveBeenCalledWith(
+      expect.stringContaining("scope=active"),
+      expect.anything(),
+    );
+
+    fireEvent.click(screen.getByRole("button", {name: "连接明细"}));
     expect(await screen.findByRole("heading", {name: "实时连接"})).toBeInTheDocument();
     expect(screen.queryByRole("heading", {name: "历史连接"})).not.toBeInTheDocument();
-    expect(screen.getAllByText("2.00 KiB/s").length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("2.00 KiB/s")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("1.00 KiB/s").length).toBeGreaterThan(0);
     expect(screen.getByText("10 秒窗口")).toBeInTheDocument();
-    expect(screen.getByTestId("line-chart")).toHaveAttribute("data-margin-top", "18");
-    expect(screen.getByTestId("y-axis")).toHaveAttribute("data-tick-margin", "8");
-    expect(screen.getByTestId("y-axis")).toHaveAttribute("data-width", "84");
 
     await waitFor(() => {
       expect(vi.mocked(api)).toHaveBeenCalledWith(
@@ -127,6 +265,8 @@ describe("NetworkPage", () => {
 
   it("keeps the current live rows visible while a refresh is in flight", async () => {
     render(<NetworkPage onUnauthorized={vi.fn()} />);
+    await screen.findByRole("heading", {name: "历史指标"});
+    fireEvent.click(screen.getByRole("button", {name: "连接明细"}));
     expect(await screen.findByText("10 秒窗口")).toBeInTheDocument();
 
     vi.mocked(api).mockImplementation(() => new Promise(() => {}));
@@ -135,6 +275,52 @@ describe("NetworkPage", () => {
     expect(screen.getByText("10 秒窗口")).toBeInTheDocument();
     expect(screen.getAllByText("2.00 KiB/s").length).toBeGreaterThan(0);
     expect(screen.queryByText("正在加载实时连接")).not.toBeInTheDocument();
+  });
+
+  it("updates scope and lazily opens an IP drill-down", async () => {
+    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    const dimension = await screen.findByRole("row", {name: /Client A.*SSH/});
+    fireEvent.click(dimension);
+    await waitFor(() => {
+      expect(vi.mocked(api)).toHaveBeenCalledWith(
+        expect.stringMatching(/client_id=client-a.*proxy_id=proxy-a|proxy_id=proxy-a.*client_id=client-a/),
+        expect.anything(),
+      );
+    });
+    expect(window.location.search).toContain("proxy_id=proxy-a");
+
+    const rankingRows = await screen.findAllByRole("row", {name: /192.0.2.10/});
+    fireEvent.click(screen.getByRole("row", {name: "按国家分类高亮：保留地址"}));
+    expect(rankingRows.every((row) => row.classList.contains("country-highlight-row"))).toBe(true);
+    fireEvent.click(rankingRows[0]);
+    await waitFor(() => {
+      expect(vi.mocked(api)).toHaveBeenCalledWith(
+        expect.stringContaining("/api/network/analytics/ip-series"),
+        expect.anything(),
+      );
+    });
+    expect(await screen.findByRole("heading", {name: /IP 详情/})).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {name: "查看该 IP 的历史连接"}));
+    expect(await screen.findByRole("heading", {name: "历史连接"})).toBeInTheDocument();
+    expect(screen.getByLabelText("搜索连接")).toHaveValue("192.0.2.10");
+  });
+
+  it("keeps an explicit all-proxies scope in client view", async () => {
+    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    await screen.findByRole("heading", {name: "历史指标"});
+    fireEvent.click(screen.getByRole("button", {name: "客户端"}));
+    expect(await screen.findByText("选择一个客户端后查看历史洞察")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("查看客户端"), {target: {value: "client-a"}});
+    const allProxies = await screen.findByRole("row", {name: /Client A.*全部代理/});
+    expect(allProxies).toHaveClass("selected-row");
+    const proxy = screen.getByRole("row", {name: /Client A.*SSH/});
+    fireEvent.click(proxy);
+    await waitFor(() => expect(window.location.search).toContain("proxy_id=proxy-a"));
+    fireEvent.click(allProxies);
+    await waitFor(() => {
+      expect(window.location.search).toContain("client_id=client-a");
+      expect(window.location.search).not.toContain("proxy_id=");
+    });
   });
 });
 

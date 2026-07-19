@@ -14,8 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
+	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -89,6 +91,10 @@ func (a *App) adminMux() http.Handler {
 	mux.HandleFunc("GET /api/network/connections", a.requireAdmin(a.handleNetworkConnections))
 	mux.HandleFunc("GET /api/network/connections/{activity_id}", a.requireAdmin(a.handleNetworkConnectionDetail))
 	mux.HandleFunc("GET /api/network/clients", a.requireAdmin(a.handleNetworkClients))
+	mux.HandleFunc("GET /api/network/analytics/overview", a.requireAdmin(a.handleNetworkAnalyticsOverview))
+	mux.HandleFunc("GET /api/network/analytics/dimensions", a.requireAdmin(a.handleNetworkAnalyticsDimensions))
+	mux.HandleFunc("GET /api/network/analytics/top-ips", a.requireAdmin(a.handleNetworkAnalyticsTopIPs))
+	mux.HandleFunc("GET /api/network/analytics/ip-series", a.requireAdmin(a.handleNetworkAnalyticsIPSeries))
 	mux.HandleFunc("GET /api/metrics/summary", a.requireAdmin(a.handleSummary))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -124,9 +130,40 @@ func (a *App) healthStatus(ctx context.Context, status string) map[string]any {
 	if a.Activity != nil && a.Activity.Degraded() {
 		activityWriter = "degraded"
 	}
+	analytics := map[string]any{
+		"status": "unavailable", "backfill_complete_from": int64(0),
+		"unaggregated_connections": int64(0),
+	}
+	if a.Activity != nil {
+		if value, err := a.Activity.AnalyticsMeta(ctx); err == nil {
+			pending, pendingErr := a.Events.CountUnaggregatedConnections(ctx)
+			if pendingErr != nil {
+				value.Status = "degraded"
+			}
+			analytics = map[string]any{
+				"status": value.Status, "backfill_complete_from": value.CompleteFrom,
+				"unaggregated_connections": pending,
+				"processed_connections":    value.ProcessedConnections,
+				"updated_at":               value.UpdatedAt,
+			}
+		} else {
+			analytics["status"] = "degraded"
+		}
+	}
+	geoStatus := map[string]any{"status": "disabled"}
+	if a.GeoIP != nil {
+		value := a.GeoIP.Status()
+		geoStatus = map[string]any{
+			"status":               value.Status,
+			"database_fingerprint": value.DatabaseFingerprint,
+			"last_reload_at":       value.LastReloadAt,
+		}
+	}
 	return map[string]any{
 		"status": status, "database": database,
 		"audit_writer": auditWriter, "activity_writer": activityWriter,
+		"network_analytics": analytics,
+		"geoip":             geoStatus,
 		"migration_version": migrationVersion,
 	}
 }
@@ -357,6 +394,14 @@ func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
 	pending, active := a.Tunnels.Counts()
 	udpChannels, udpPendingChannels, udpFlows := a.UDP.Counts()
 	resources := currentProcessResources()
+	analyticsMetrics := activity.Metrics{}
+	if a.Activity != nil {
+		analyticsMetrics = a.Activity.Metrics()
+	}
+	geoIPMetrics := geoip.Metrics{}
+	if a.GeoIP != nil {
+		geoIPMetrics = a.GeoIP.Metrics()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"online_clients":  len(a.Sessions.Snapshot()),
 		"pending_tunnels": pending, "active_tunnels": active,
@@ -365,7 +410,10 @@ func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
 		"goroutines": resources.Goroutines, "open_fds": resources.OpenFDs,
 		"heap_alloc_bytes": resources.HeapAlloc, "heap_inuse_bytes": resources.HeapInuse,
 		"stack_inuse_bytes": resources.StackInuse, "system_memory_bytes": resources.SystemMemory,
-		"degraded": a.Degraded(),
+		"network_analytics_metrics":       analyticsMetrics,
+		"network_analytics_query_metrics": a.analytics.snapshot(),
+		"geoip_metrics":                   geoIPMetrics,
+		"degraded":                        a.Degraded(),
 	})
 }
 

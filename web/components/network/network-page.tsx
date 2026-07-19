@@ -20,26 +20,38 @@ import type {
   Page,
 } from "@/lib/types";
 import { Dialog } from "@/components/ui/dialog";
+import {
+  HistoryInsights,
+  type AnalyticsRangeSelection,
+  type TopMetric,
+} from "@/components/network/history-insights";
 
-type Range = "1h" | "24h" | "7d" | "30d";
 type ConnectionView = "active" | "history";
-const ranges: Range[] = ["1h", "24h", "7d", "30d"];
+type NetworkSection = "insights" | "connections";
 const protocols = ["", "tcp", "udp"];
 const historicalStates = ["", "closed", "failed", "interrupted"];
 const sorts = ["accepted_desc", "accepted_asc", "traffic_desc", "duration_desc"];
-const overviewChartMargin = {top: 18, right: 12, bottom: 6, left: 4};
 const detailChartMargin = {top: 16, right: 10, bottom: 6, left: 4};
 
 export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
   const initial = useMemo(() => typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search), []);
   const [view, setView] = useState<"overall" | "client">(initial.get("network_view") === "client" ? "client" : "overall");
+  const [section, setSection] = useState<NetworkSection>(initial.get("network_section") === "connections" ? "connections" : "insights");
   const [connectionView, setConnectionView] = useState<ConnectionView>(initial.get("connection_view") === "history" ? "history" : "active");
   const initialRange = initial.get("range") ?? "";
   const initialActivePage = Number(initial.get("active_page"));
   const initialHistoryPage = Number(initial.get("history_page") ?? initial.get("page"));
-  const [range, setRange] = useState<Range>(ranges.includes(initialRange as Range) ? initialRange as Range : "24h");
+  const [range, setRange] = useState<AnalyticsRangeSelection>(
+    ["1h", "24h", "7d", "30d", "90d", "custom"].includes(initialRange) ? initialRange as AnalyticsRangeSelection : "24h",
+  );
+  const [customFrom, setCustomFrom] = useState(() => initial.get("from") ? toLocalInput(Number(initial.get("from"))) : toLocalInput(Date.now() - 24 * 60 * 60 * 1000));
+  const [customTo, setCustomTo] = useState(() => initial.get("to") ? toLocalInput(Number(initial.get("to"))) : toLocalInput(Date.now()));
   const [clientID, setClientID] = useState(initial.get("client_id") ?? "");
   const [protocol, setProtocol] = useState(protocols.includes(initial.get("protocol") ?? "") ? initial.get("protocol") ?? "" : "");
+  const [proxyID, setProxyID] = useState(initial.get("proxy_id") ?? "");
+  const [sourceIP, setSourceIP] = useState(initial.get("source_ip") ?? "");
+  const [topK, setTopK] = useState<5 | 10 | 20>([5, 10, 20].includes(Number(initial.get("top_k"))) ? Number(initial.get("top_k")) as 5 | 10 | 20 : 10);
+  const [topMetric, setTopMetric] = useState<TopMetric>(initial.get("top_metric") === "traffic" ? "traffic" : "connections");
   const [historyState, setHistoryState] = useState(historicalStates.includes(initial.get("state") ?? "") ? initial.get("state") ?? "" : "");
   const [sort, setSort] = useState(sorts.includes(initial.get("sort") ?? "") ? initial.get("sort") ?? "accepted_desc" : "accepted_desc");
   const [query, setQuery] = useState((initial.get("query") ?? "").slice(0, 128));
@@ -60,8 +72,8 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     const controller = new AbortController();
     activeRequest.current = controller;
     const sequence = ++requestSequence.current;
-    const selectedClient = view === "client" ? clientID : "";
-    const summaryParams = new URLSearchParams({range});
+    const selectedClient = view === "client" || proxyID ? clientID : "";
+    const summaryParams = new URLSearchParams({range: "24h"});
     if (selectedClient) summaryParams.set("client_id", selectedClient);
     const connectionParams = new URLSearchParams({
       scope: connectionView,
@@ -76,16 +88,20 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
       if (historyState) connectionParams.set("state", historyState);
     }
     try {
-      const [summaryResult, connectionResult, clientResult] = await Promise.all([
+      const [summaryResult, clientResult] = await Promise.all([
         api<NetworkSummary>(`/api/network/summary?${summaryParams}`, {signal: controller.signal}),
-        api<Page<NetworkConnection>>(`/api/network/connections?${connectionParams}`, {signal: controller.signal}),
         api<Page<NetworkClient>>("/api/network/clients?page=1&page_size=100", {signal: controller.signal}),
       ]);
+      const connectionResult = section === "connections"
+        ? await api<Page<NetworkConnection>>(`/api/network/connections?${connectionParams}`, {signal: controller.signal})
+        : null;
       if (sequence !== requestSequence.current) return;
       setSummary(summaryResult);
-      if (connectionView === "active") setActiveConnections(connectionResult);
-      else setHistoryConnections(connectionResult);
-      setLoadedViews((current) => current[connectionView] ? current : {...current, [connectionView]: true});
+      if (connectionResult) {
+        if (connectionView === "active") setActiveConnections(connectionResult);
+        else setHistoryConnections(connectionResult);
+        setLoadedViews((current) => current[connectionView] ? current : {...current, [connectionView]: true});
+      }
       setClients(clientResult.items);
       setStale(false);
     } catch (caught) {
@@ -97,16 +113,30 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         if (activeRequest.current === controller) activeRequest.current = null;
       }
     }
-  }, [activePage, clientID, connectionView, historyPage, historyState, onUnauthorized, protocol, query, range, sort, view]);
+  }, [activePage, clientID, connectionView, historyPage, historyState, onUnauthorized, protocol, proxyID, query, section, sort, view]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     params.set("network_view", view);
+    params.set("network_section", section);
     params.set("connection_view", connectionView);
     params.set("range", range);
-    if (view === "client" && clientID) params.set("client_id", clientID);
+    if (range === "custom") {
+      const from = new Date(customFrom).getTime();
+      const to = new Date(customTo).getTime();
+      setOptionalParam(params, "from", Number.isFinite(from) ? String(from) : "");
+      setOptionalParam(params, "to", Number.isFinite(to) ? String(to) : "");
+    } else {
+      params.delete("from");
+      params.delete("to");
+    }
+    if ((view === "client" || proxyID) && clientID) params.set("client_id", clientID);
     else params.delete("client_id");
     setOptionalParam(params, "protocol", protocol);
+    setOptionalParam(params, "proxy_id", proxyID);
+    setOptionalParam(params, "source_ip", sourceIP);
+    setOptionalParam(params, "top_k", topK === 10 ? "" : String(topK));
+    setOptionalParam(params, "top_metric", topMetric === "connections" ? "" : topMetric);
     setOptionalParam(params, "state", historyState);
     setOptionalParam(params, "sort", sort === "accepted_desc" ? "" : sort);
     setOptionalParam(params, "query", query);
@@ -114,7 +144,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     setOptionalParam(params, "active_page", activePage === 1 ? "" : String(activePage));
     setOptionalParam(params, "history_page", historyPage === 1 ? "" : String(historyPage));
     window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
-  }, [activePage, clientID, connectionView, historyPage, historyState, protocol, query, range, sort, view]);
+  }, [activePage, clientID, connectionView, customFrom, customTo, historyPage, historyState, protocol, proxyID, query, range, section, sort, sourceIP, topK, topMetric, view]);
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => void load(), 0);
@@ -147,18 +177,18 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     <section className="section-block first">
       <div className="section-heading network-heading">
         <div className="segmented" aria-label="网络活动视图">
-          <button className={view === "overall" ? "selected" : ""} onClick={() => {setView("overall"); setActivePage(1); setHistoryPage(1);}}>整体</button>
-          <button className={view === "client" ? "selected" : ""} onClick={() => {setView("client"); setActivePage(1); setHistoryPage(1);}}>客户端</button>
+          <button className={view === "overall" ? "selected" : ""} onClick={() => {setView("overall"); setClientID(""); setProxyID(""); setActivePage(1); setHistoryPage(1);}}>整体</button>
+          <button className={view === "client" ? "selected" : ""} onClick={() => {setView("client"); setProxyID(""); setActivePage(1); setHistoryPage(1);}}>客户端</button>
         </div>
-        <div className="segmented compact" aria-label="时间范围">
-          {ranges.map((value) => <button key={value} className={range === value ? "selected" : ""} onClick={() => setRange(value)}>{value}</button>)}
-        </div>
+        <select aria-label="网络活动协议" value={protocol} onChange={(event) => {setProtocol(event.target.value); setActivePage(1); setHistoryPage(1);}}>
+          <option value="">全部协议</option><option value="tcp">TCP</option><option value="udp">UDP</option>
+        </select>
         <button className="icon-button" onClick={() => void load()} title="刷新" aria-label="刷新网络活动"><RefreshCw size={17} /></button>
       </div>
       {view === "client" && (
         <div className="client-selector">
           <label>查看客户端
-            <select value={clientID} onChange={(event) => {setClientID(event.target.value); setActivePage(1); setHistoryPage(1);}}>
+            <select value={clientID} onChange={(event) => {setClientID(event.target.value); setProxyID(""); setActivePage(1); setHistoryPage(1);}}>
               <option value="">选择客户端</option>
               {clients.map((client) => <option key={client.client_id} value={client.client_id}>{client.client_remark} · {client.client_id}{client.deleted ? "（已删除）" : ""}</option>)}
             </select>
@@ -167,41 +197,45 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         </div>
       )}
       {stale && <div className="stale-banner">网络活动刷新失败，当前数据可能已过期</div>}
-      <div className="metric-strip">
-        <Metric label="活跃连接" value={summary?.active_connections ?? 0} />
-        <Metric label="活跃客户端" value={summary?.active_clients ?? 0} />
-        <Metric label="区间连接" value={summary?.connections ?? 0} />
-        <Metric label="失败率" value={`${((summary?.failure_rate ?? 0) * 100).toFixed(1)}%`} />
-        <Metric label="上传" value={formatBytes(summary?.up_bytes ?? 0)} />
-        <Metric label="下载" value={formatBytes(summary?.down_bytes ?? 0)} />
-      </div>
-      <section className="chart-section" aria-label="网络流量趋势">
-        <div className="section-heading"><div><h2>流量趋势</h2><p>实线上传，虚线下载；连接峰值见文本摘要</p></div></div>
-        <div className="chart-frame">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={summary?.series ?? []} margin={overviewChartMargin}>
-              <CartesianGrid stroke="#e4e9eb" vertical={false} />
-              <XAxis dataKey="bucket_at" tickFormatter={(value) => new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})} minTickGap={24} />
-              <YAxis tickFormatter={(value) => formatBytes(value)} tickMargin={8} width={84} />
-              <Tooltip labelFormatter={(value) => new Date(Number(value)).toLocaleString()} formatter={(value) => formatBytes(Number(value))} />
-              <Line type="monotone" dataKey="up_bytes" name="上传" stroke="#087f75" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line type="monotone" dataKey="down_bytes" name="下载" stroke="#b35f20" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-        <p className="chart-summary">本区间上传 {formatBytes(summary?.up_bytes ?? 0)}，下载 {formatBytes(summary?.down_bytes ?? 0)}，失败 {summary?.failures ?? 0} 条。</p>
+      <section className="current-status-band" aria-label="当前状态">
+        <div><span>当前活跃连接</span><strong>{summary?.active_connections ?? 0}</strong></div>
+        <div><span>当前活跃客户端</span><strong>{summary?.active_clients ?? 0}</strong></div>
       </section>
-      {view === "overall" && (
-        <section className="section-block">
-          <div className="section-heading"><div><h2>客户端汇总</h2><p>当前状态与保留期内历史</p></div></div>
-          <div className="table-wrap"><table className="network-client-table responsive-table"><thead><tr><th>客户端</th><th>状态</th><th>活跃</th><th>历史</th><th>失败</th><th>上传</th><th>下载</th></tr></thead><tbody>
-            {(summary?.clients ?? []).map((client) => <tr key={client.client_id} className="clickable-row" onClick={() => {setClientID(client.client_id); setView("client");}}>
-              <td><strong>{client.client_remark}</strong><small>{client.client_id}{client.deleted ? " · 已删除" : ""}</small></td><td>{client.online ? "在线" : "离线"}</td><td>{client.active_connections}</td><td>{client.historical_connections}</td><td>{client.failures}</td><td>{formatBytes(client.up_bytes)}</td><td>{formatBytes(client.down_bytes)}</td>
-            </tr>)}
-          </tbody></table></div>
-        </section>
-      )}
-      <section className="section-block connections-section">
+      <div className="segmented network-section-tabs" aria-label="网络活动内容">
+        <button className={section === "insights" ? "selected" : ""} onClick={() => setSection("insights")}>历史洞察</button>
+        <button className={section === "connections" ? "selected" : ""} onClick={() => setSection("connections")}>连接明细</button>
+      </div>
+      {section === "insights" && <HistoryInsights
+        view={view}
+        clientID={clientID}
+        protocol={protocol}
+        range={range}
+        customFrom={customFrom}
+        customTo={customTo}
+        proxyID={proxyID}
+        sourceIP={sourceIP}
+        topK={topK}
+        topMetric={topMetric}
+        clients={clients}
+        onRangeChange={setRange}
+        onCustomFromChange={setCustomFrom}
+        onCustomToChange={setCustomTo}
+        onScopeChange={(scopeClientID, scopeProxyID) => {
+          setClientID(scopeClientID);
+          setProxyID(scopeProxyID);
+        }}
+        onSourceIPChange={setSourceIP}
+        onTopKChange={setTopK}
+        onTopMetricChange={setTopMetric}
+        onViewHistory={(ip) => {
+          setSection("connections");
+          setConnectionView("history");
+          setQuery(ip);
+          setHistoryPage(1);
+        }}
+        onUnauthorized={onUnauthorized}
+      />}
+      {section === "connections" && <section className="section-block connections-section">
         <div className="section-heading connections-heading">
           <div><h2>连接</h2><p>选择查看当前存活连接或已结束的历史连接</p></div>
           <div className="segmented connection-tabs" aria-label="连接类型">
@@ -236,7 +270,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
           </tbody></table></div>
           <Pagination page={historyPage} total={historyConnections.total} totalPages={historyConnections.total_pages} onPageChange={setHistoryPage} label="历史连接" />
         </section>}
-      </section>
+      </section>}
       <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title="连接详情" description={detail?.activity_id} side>
         {detail && <NetworkDetailView detail={detail} />}
       </Dialog>
@@ -287,10 +321,6 @@ function NetworkDetailView({detail}: {detail: NetworkDetail}) {
     </section>
     {detail.samples_expired && <div className="stale-banner">细粒度流量序列已过保留期</div>}
   </div>;
-}
-
-function Metric({label, value}: {label: string; value: string | number}) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function Pagination({
@@ -355,4 +385,11 @@ function formatDuration(milliseconds: number) {
 function setOptionalParam(params: URLSearchParams, key: string, value: string) {
   if (value) params.set(key, value);
   else params.delete(key);
+}
+
+function toLocalInput(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(value - offset).toISOString().slice(0, 16);
 }

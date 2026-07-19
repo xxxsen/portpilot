@@ -4,6 +4,8 @@ go 1.26.0
 
 require (
 	github.com/gorilla/websocket v1.5.3
+	github.com/maxmind/mmdbwriter v1.2.0
+	github.com/oschwald/maxminddb-golang/v2 v2.4.1
 	github.com/spf13/cobra v1.10.2
 	github.com/xtaci/smux v1.5.57
 	golang.org/x/crypto v0.54.0
@@ -20,6 +22,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

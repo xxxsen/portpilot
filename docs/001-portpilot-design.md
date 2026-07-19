@@ -4,8 +4,12 @@
 
 PortPilot 是一个由服务端集中管理代理规则、由客户端访问内网目标的反向代理系统。
 
-本文记录已经落地且需要长期保持的架构、协议、安全和运行时契约。管理后台、审计、网络活动、SQLite migration 和 CLI 的详细契约见
-[`002-admin-console-and-cli-improvements.md`](002-admin-console-and-cli-improvements.md)。具体默认参数以配置校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
+本文记录已经落地且需要长期保持的架构、协议、安全和运行时契约。管理后台、审计、连接活动、
+SQLite migration 和 CLI 的详细契约见
+[`002-admin-console-and-cli-improvements.md`](002-admin-console-and-cli-improvements.md)，历史
+聚合、Top K、GeoIP 和 IP 下钻见
+[`003-network-history-analytics.md`](003-network-history-analytics.md)。具体默认参数以配置
+校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
 
 核心边界：
 

@@ -17,7 +17,7 @@ async function navigate(page: Page, label: "客户端" | "代理规则" | "网�
 }
 
 async function expectYAxisLabelsInsideChart(page: Page) {
-  const chart = page.locator(".chart-frame");
+  const chart = page.locator(".insight-chart").first();
   const svg = chart.locator("svg");
   const ticks = chart.locator(".recharts-yAxis .recharts-cartesian-axis-tick-value");
   await expect(ticks.first()).toBeVisible();
@@ -169,8 +169,71 @@ test("live status and audit views expose the formal server state", async ({page}
 
   await navigate(page, "网络活动");
   await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "历史洞察", exact: true})).toHaveClass(/selected/);
   await expect(page.getByRole("button", {name: "24h"})).toHaveClass(/selected/);
+  await expect(page.getByRole("heading", {name: "历史指标"})).toBeVisible();
   await expectYAxisLabelsInsideChart(page);
+  const chartBeforeRefresh = await page.locator(".insight-chart").first().boundingBox();
+  const refreshResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/network/analytics/overview") && response.ok()
+  );
+  await page.getByRole("button", {name: "刷新历史洞察"}).click();
+  await refreshResponse;
+  const chartAfterRefresh = await page.locator(".insight-chart").first().boundingBox();
+  expect(chartBeforeRefresh).not.toBeNull();
+  expect(chartAfterRefresh).not.toBeNull();
+  expect(Math.abs(chartAfterRefresh!.height - chartBeforeRefresh!.height)).toBeLessThan(1);
+  expect(Math.abs(chartAfterRefresh!.width - chartBeforeRefresh!.width)).toBeLessThan(1);
+  const analyticsResponse = await page.request.get("/backend/api/network/analytics/overview?range=24h");
+  expect(analyticsResponse.ok()).toBeTruthy();
+  const analytics = await analyticsResponse.json() as {
+    connections: number;
+    series: Array<{bucket_at: number}>;
+    completeness: {status: string; geoip_status: string};
+  };
+  expect(analytics.connections).toBeGreaterThan(0);
+  expect(analytics.series.length).toBe(24);
+  expect(["ready", "backfilling"]).toContain(analytics.completeness.status);
+  expect(["disabled", "ready", "degraded"]).toContain(analytics.completeness.geoip_status);
+  const connectionRows = page.locator(".ranking-connections tbody tr");
+  const trafficRows = page.locator(".ranking-traffic tbody tr");
+  const connectionTarget = connectionRows.filter({hasText: "127.0.0.2"});
+  const trafficTarget = trafficRows.filter({hasText: "127.0.0.3"});
+  await expect(connectionTarget).toBeVisible();
+  await expect(connectionRows.filter({hasText: "127.0.0.3"})).toBeVisible();
+  const connectionRanking = await connectionRows.allTextContents();
+  expect(connectionRanking.findIndex((row) => row.includes("127.0.0.2"))).toBeLessThan(
+    connectionRanking.findIndex((row) => row.includes("127.0.0.3")),
+  );
+  await connectionTarget.click();
+  const trafficRankingTab = page.getByRole("button", {name: "按流量", exact: true});
+  if (await trafficRankingTab.isVisible()) await trafficRankingTab.click();
+  await expect(trafficTarget).toBeVisible();
+  await expect(trafficRows.filter({hasText: "127.0.0.2"})).toBeVisible();
+  const trafficRanking = await trafficRows.allTextContents();
+  expect(trafficRanking.findIndex((row) => row.includes("127.0.0.3"))).toBeLessThan(
+    trafficRanking.findIndex((row) => row.includes("127.0.0.2")),
+  );
+  await expect(page.getByRole("heading", {name: /IP 详情.*127\.0\.0\.2/})).toBeVisible();
+  await expect(page.locator(".ranking-table tbody tr.selected-row").filter({hasText: "127.0.0.2"})).toHaveCount(2);
+  await expect(page.locator(".ip-detail-section .insight-chart")).toHaveCount(2);
+  await page.getByRole("button", {name: "查看该 IP 的历史连接"}).click();
+  await expect(page.getByRole("heading", {name: "历史连接"})).toBeVisible();
+  await expect(page.getByLabel("搜索连接")).toHaveValue("127.0.0.2");
+  await page.getByRole("button", {name: "历史洞察", exact: true}).click();
+  const proxyDimension = page.locator(".analytics-dimension-table tbody tr").filter({hasText: "dev-tcp-echo"});
+  await expect(proxyDimension).toBeVisible();
+  await proxyDimension.click();
+  await expect(page.locator(".scope-breadcrumb")).toContainText("Local TCP echo");
+  expect(new URL(page.url()).searchParams.get("proxy_id")).toBe("dev-tcp-echo");
+  const hasHorizontalOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+  );
+  expect(hasHorizontalOverflow).toBe(false);
+  await page.getByRole("button", {name: "连接明细"}).click();
+  await expect(page.getByRole("heading", {name: "历史连接"})).toBeVisible();
+  await expect(page.getByLabel("搜索连接")).toHaveValue("127.0.0.2");
+  await page.getByRole("button", {name: "实时连接"}).click();
   await expect(page.getByRole("heading", {name: "实时连接"})).toBeVisible();
   await expect(page.locator(".live-connections-table th:visible").filter({hasText: /上行速率|实时速率/})).toBeVisible();
   await page.getByRole("button", {name: "历史连接"}).click();

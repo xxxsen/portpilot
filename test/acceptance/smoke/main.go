@@ -33,10 +33,13 @@ func run() error {
 	if err := smokeHTTP(ctx, adminURL, webURL); err != nil {
 		return err
 	}
-	if err := smokeTCP(ctx, "127.0.0.1:7000"); err != nil {
-		return fmt.Errorf("smux TCP smoke: %w", err)
+	if err := smokeTCP(ctx, "127.0.0.1:7000", "127.0.0.2", 512); err != nil {
+		return fmt.Errorf("first smux TCP smoke: %w", err)
 	}
-	if err := smokeTCP(ctx, "127.0.0.1:7002"); err != nil {
+	if err := smokeTCP(ctx, "127.0.0.1:7000", "127.0.0.2", 512); err != nil {
+		return fmt.Errorf("second smux TCP smoke: %w", err)
+	}
+	if err := smokeTCP(ctx, "127.0.0.1:7002", "127.0.0.3", 32*1024); err != nil {
 		return fmt.Errorf("direct TCP smoke: %w", err)
 	}
 	if err := smokeUDP("127.0.0.1:7001"); err != nil {
@@ -127,9 +130,13 @@ func smokeHTTP(ctx context.Context, adminURL, webURL string) error {
 	return nil
 }
 
-func smokeTCP(ctx context.Context, address string) error {
-	payload := []byte(fmt.Sprintf("portpilot-tcp-%d", time.Now().UnixNano()))
-	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "tcp", address)
+func smokeTCP(ctx context.Context, address, sourceIP string, payloadSize int) error {
+	seed := []byte(fmt.Sprintf("portpilot-tcp-%d-", time.Now().UnixNano()))
+	payload := bytes.Repeat(seed, payloadSize/len(seed)+1)[:payloadSize]
+	conn, err := (&net.Dialer{
+		Timeout:   3 * time.Second,
+		LocalAddr: &net.TCPAddr{IP: net.ParseIP(sourceIP)},
+	}).DialContext(ctx, "tcp", address)
 	if err != nil {
 		return err
 	}
@@ -159,7 +166,8 @@ func smokeUDP(address string) error {
 		return err
 	}
 	for source := 0; source < 2; source++ {
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+		sourceIP := net.ParseIP(fmt.Sprintf("127.0.0.%d", source+2))
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: sourceIP})
 		if err != nil {
 			return err
 		}

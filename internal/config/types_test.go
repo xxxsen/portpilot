@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const testToken = "01234567890123456789012345678901234567890123"
@@ -40,6 +41,43 @@ func TestStrictConfigRejectsUnknownField(t *testing.T) {
 	}
 	if _, err := LoadClient(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown field error not returned: %v", err)
+	}
+}
+
+func TestAnalyticsObservabilityRetentionValidation(t *testing.T) {
+	t.Parallel()
+	base := DefaultServerConfig().Observability
+	if err := validateObservability(base); err != nil {
+		t.Fatalf("default observability config is invalid: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*ObservabilityConfig)
+	}{
+		{
+			name: "statistics too short",
+			mutate: func(value *ObservabilityConfig) {
+				value.NetworkStatisticsRetention = (29 * 24 * time.Hour).String()
+			},
+		},
+		{
+			name: "fine rollup too long",
+			mutate: func(value *ObservabilityConfig) {
+				value.NetworkFineRollupRetention = (8 * 24 * time.Hour).String()
+			},
+		},
+		{
+			name: "geoip reload too frequent",
+			mutate: func(value *ObservabilityConfig) {
+				value.GeoIPReloadInterval = (9 * time.Minute).String()
+			},
+		},
+	} {
+		value := base
+		test.mutate(&value)
+		if err := validateObservability(value); err == nil {
+			t.Fatalf("%s was accepted", test.name)
+		}
 	}
 }
 

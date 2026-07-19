@@ -15,6 +15,7 @@ import (
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
+	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
 	"github.com/portpilot/portpilot/internal/version"
 )
@@ -30,6 +31,7 @@ type App struct {
 	Listeners      *ListenerManager
 	Events         *store.Store
 	Activity       *activity.Service
+	GeoIP          *geoip.Resolver
 	Admin          *AdminAuth
 	ControlLimiter *auth.RateLimiter
 	DataLimiter    *auth.RateLimiter
@@ -37,9 +39,12 @@ type App struct {
 
 	adminServer *http.Server
 	dataServer  *http.Server
-	storeError  atomic.Bool
-	ready       atomic.Bool
-	closeOnce   sync.Once
+	analytics   analyticsQueryMetrics
+
+	analyticsTimeout time.Duration
+	storeError       atomic.Bool
+	ready            atomic.Bool
+	closeOnce        sync.Once
 }
 
 func New(configPath string, logger *slog.Logger) (*App, error) {
@@ -103,15 +108,29 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 			return nil, fmt.Errorf("audit client metadata migration: %w", err)
 		}
 	}
+	geoResolver, err := geoip.New(
+		cfg.Observability.GeoIPCountryDatabase,
+		cfg.Duration(cfg.Observability.GeoIPReloadInterval),
+		logger,
+	)
+	if err != nil {
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("initialize geoip resolver: %w", err)
+	}
+	app.GeoIP = geoResolver
 	activityService, err := activity.New(eventStore, activity.Config{
-		SampleInterval:   cfg.Duration(cfg.Observability.SampleInterval),
-		CleanupInterval:  cfg.Duration(cfg.Observability.CleanupInterval),
-		AuditRetention:   cfg.Duration(cfg.Observability.AuditRetention),
-		NetworkRetention: cfg.Duration(cfg.Observability.NetworkRetention),
-		SampleRetention:  cfg.Duration(cfg.Observability.NetworkSampleRetention),
-		MaxActive:        cfg.Observability.MaxActiveConnections,
+		SampleInterval:      cfg.Duration(cfg.Observability.SampleInterval),
+		CleanupInterval:     cfg.Duration(cfg.Observability.CleanupInterval),
+		AuditRetention:      cfg.Duration(cfg.Observability.AuditRetention),
+		NetworkRetention:    cfg.Duration(cfg.Observability.NetworkRetention),
+		SampleRetention:     cfg.Duration(cfg.Observability.NetworkSampleRetention),
+		StatisticsRetention: cfg.Duration(cfg.Observability.NetworkStatisticsRetention),
+		FineRollupRetention: cfg.Duration(cfg.Observability.NetworkFineRollupRetention),
+		MaxActive:           cfg.Observability.MaxActiveConnections,
+		GeoIP:               geoResolver,
 	}, logger)
 	if err != nil {
+		geoResolver.Close()
 		_ = eventStore.Close()
 		return nil, fmt.Errorf("initialize network activity: %w", err)
 	}
@@ -119,6 +138,7 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 	commit, _, err := app.Listeners.Prepare(configManager.Snapshot())
 	if err != nil {
 		activityService.Close()
+		geoResolver.Close()
 		if eventStore != nil {
 			_ = eventStore.Close()
 		}
@@ -128,6 +148,7 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 	schemaVersion, err := eventStore.SchemaVersion(context.Background())
 	if err != nil {
 		activityService.Close()
+		geoResolver.Close()
 		_ = eventStore.Close()
 		return nil, fmt.Errorf("read migration version: %w", err)
 	}
@@ -139,6 +160,7 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 		},
 	}); err != nil {
 		activityService.Close()
+		geoResolver.Close()
 		_ = eventStore.Close()
 		return nil, fmt.Errorf("audit system start: %w", err)
 	}
@@ -189,6 +211,7 @@ func (a *App) Close(parent context.Context) error {
 		a.Listeners.Close()
 		a.UDP.Close()
 		a.Activity.Close()
+		a.GeoIP.Close()
 		adminErr := a.adminServer.Shutdown(ctx)
 		dataErr := a.dataServer.Shutdown(ctx)
 		a.writeAuditBestEffort(ctx, store.AuditEvent{
@@ -209,7 +232,8 @@ func (a *App) Ready() bool {
 func (a *App) Degraded() bool {
 	return a.storeError.Load() ||
 		(a.Events != nil && a.Events.Degraded()) ||
-		(a.Activity != nil && a.Activity.Degraded())
+		(a.Activity != nil && a.Activity.Degraded()) ||
+		(a.GeoIP != nil && a.GeoIP.Degraded())
 }
 
 func (a *App) serveData(w http.ResponseWriter, r *http.Request) {

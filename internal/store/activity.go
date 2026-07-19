@@ -11,32 +11,34 @@ import (
 )
 
 type NetworkConnection struct {
-	ActivityID         string `json:"activity_id"`
-	Protocol           string `json:"protocol"`
-	State              string `json:"state"`
-	ClientID           string `json:"client_id"`
-	ClientRemark       string `json:"client_remark"`
-	ProxyID            string `json:"proxy_id"`
-	ProxyRemark        string `json:"proxy_remark"`
-	ExternalAddr       string `json:"external_addr"`
-	ServerBind         string `json:"server_bind"`
-	TargetAddr         string `json:"target_addr"`
-	Transport          string `json:"transport"`
-	SessionEpoch       uint64 `json:"session_epoch"`
-	AcceptedAt         int64  `json:"accepted_at"`
-	ConnectedAt        *int64 `json:"connected_at,omitempty"`
-	LastActivityAt     int64  `json:"last_activity_at"`
-	ClosedAt           *int64 `json:"closed_at,omitempty"`
-	UpBytes            int64  `json:"up_bytes"`
-	DownBytes          int64  `json:"down_bytes"`
-	UpPackets          int64  `json:"up_packets"`
-	DownPackets        int64  `json:"down_packets"`
-	UpBytesPerSecond   int64  `json:"up_bytes_per_second"`
-	DownBytesPerSecond int64  `json:"down_bytes_per_second"`
-	RateSampledAt      int64  `json:"rate_sampled_at"`
-	RateWindowMillis   int64  `json:"rate_window_millis"`
-	CloseReasonCode    string `json:"close_reason_code"`
-	CloseReason        string `json:"close_reason"`
+	ActivityID            string `json:"activity_id"`
+	Protocol              string `json:"protocol"`
+	State                 string `json:"state"`
+	ClientID              string `json:"client_id"`
+	ClientRemark          string `json:"client_remark"`
+	ProxyID               string `json:"proxy_id"`
+	ProxyRemark           string `json:"proxy_remark"`
+	ExternalAddr          string `json:"external_addr"`
+	ExternalIP            string `json:"external_ip"`
+	ServerBind            string `json:"server_bind"`
+	TargetAddr            string `json:"target_addr"`
+	Transport             string `json:"transport"`
+	SessionEpoch          uint64 `json:"session_epoch"`
+	AcceptedAt            int64  `json:"accepted_at"`
+	ConnectedAt           *int64 `json:"connected_at,omitempty"`
+	LastActivityAt        int64  `json:"last_activity_at"`
+	ClosedAt              *int64 `json:"closed_at,omitempty"`
+	UpBytes               int64  `json:"up_bytes"`
+	DownBytes             int64  `json:"down_bytes"`
+	UpPackets             int64  `json:"up_packets"`
+	DownPackets           int64  `json:"down_packets"`
+	UpBytesPerSecond      int64  `json:"up_bytes_per_second"`
+	DownBytesPerSecond    int64  `json:"down_bytes_per_second"`
+	RateSampledAt         int64  `json:"rate_sampled_at"`
+	RateWindowMillis      int64  `json:"rate_window_millis"`
+	CloseReasonCode       string `json:"close_reason_code"`
+	CloseReason           string `json:"close_reason"`
+	AnalyticsAggregatedAt *int64 `json:"-"`
 }
 
 type NetworkSample struct {
@@ -142,13 +144,13 @@ func (s *Store) CreateNetworkConnection(ctx context.Context, connection NetworkC
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO network_connections (
 		activity_id, protocol, state, client_id, client_remark, proxy_id,
-		proxy_remark, external_addr, server_bind, target_addr, transport,
+		proxy_remark, external_addr, external_ip, server_bind, target_addr, transport,
 		session_epoch, accepted_at, connected_at, last_activity_at, closed_at,
 		up_bytes, down_bytes, up_packets, down_packets, close_reason_code, close_reason
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		connection.ActivityID, connection.Protocol, connection.State, connection.ClientID,
 		connection.ClientRemark, connection.ProxyID, connection.ProxyRemark,
-		connection.ExternalAddr, connection.ServerBind, connection.TargetAddr,
+		connection.ExternalAddr, connection.ExternalIP, connection.ServerBind, connection.TargetAddr,
 		connection.Transport, connection.SessionEpoch, connection.AcceptedAt,
 		connection.ConnectedAt, connection.LastActivityAt, connection.ClosedAt,
 		connection.UpBytes, connection.DownBytes, connection.UpPackets, connection.DownPackets,
@@ -326,9 +328,10 @@ func (s *Store) ListNetworkConnections(ctx context.Context, query NetworkQuery) 
 }
 
 const networkConnectionColumns = `activity_id, protocol, state, client_id, client_remark,
-	proxy_id, proxy_remark, external_addr, server_bind, target_addr, transport,
+	proxy_id, proxy_remark, external_addr, external_ip, server_bind, target_addr, transport,
 	session_epoch, accepted_at, connected_at, last_activity_at, closed_at,
-	up_bytes, down_bytes, up_packets, down_packets, close_reason_code, close_reason`
+	up_bytes, down_bytes, up_packets, down_packets, close_reason_code, close_reason,
+	analytics_aggregated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -336,15 +339,16 @@ type rowScanner interface {
 
 func scanNetworkConnection(scanner rowScanner) (NetworkConnection, error) {
 	var connection NetworkConnection
-	var connectedAt, closedAt sql.NullInt64
+	var connectedAt, closedAt, analyticsAggregatedAt sql.NullInt64
 	if err := scanner.Scan(
 		&connection.ActivityID, &connection.Protocol, &connection.State,
 		&connection.ClientID, &connection.ClientRemark, &connection.ProxyID,
-		&connection.ProxyRemark, &connection.ExternalAddr, &connection.ServerBind,
+		&connection.ProxyRemark, &connection.ExternalAddr, &connection.ExternalIP, &connection.ServerBind,
 		&connection.TargetAddr, &connection.Transport, &connection.SessionEpoch,
 		&connection.AcceptedAt, &connectedAt, &connection.LastActivityAt, &closedAt,
 		&connection.UpBytes, &connection.DownBytes, &connection.UpPackets,
 		&connection.DownPackets, &connection.CloseReasonCode, &connection.CloseReason,
+		&analyticsAggregatedAt,
 	); err != nil {
 		return NetworkConnection{}, fmt.Errorf("scan network connection: %w", err)
 	}
@@ -353,6 +357,9 @@ func scanNetworkConnection(scanner rowScanner) (NetworkConnection, error) {
 	}
 	if closedAt.Valid {
 		connection.ClosedAt = &closedAt.Int64
+	}
+	if analyticsAggregatedAt.Valid {
+		connection.AnalyticsAggregatedAt = &analyticsAggregatedAt.Int64
 	}
 	return connection, nil
 }
@@ -652,7 +659,10 @@ func (s *Store) Cleanup(
 		)`, networkBefore},
 		{`DELETE FROM network_connections WHERE rowid IN (
 			SELECT rowid FROM network_connections
-			WHERE accepted_at < ? AND state IN ('closed', 'failed', 'interrupted') LIMIT 1000
+			WHERE accepted_at < ?
+			  AND analytics_aggregated_at IS NOT NULL
+			  AND state IN ('closed', 'failed', 'interrupted')
+			LIMIT 1000
 		)`, networkBefore},
 		{`DELETE FROM audit_events WHERE rowid IN (
 			SELECT rowid FROM audit_events WHERE occurred_at < ? LIMIT 1000

@@ -10,14 +10,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	db       *sql.DB
-	degraded atomic.Bool
+	db               *sql.DB
+	degraded         atomic.Bool
+	analyticsVersion atomic.Uint64
+	analyticsCacheMu sync.RWMutex
+	analyticsCache   map[analyticsCacheKey]any
 }
 
 func Open(path string, logger *slog.Logger) (*Store, error) {
@@ -61,7 +65,7 @@ func Open(path string, logger *slog.Logger) (*Store, error) {
 			return nil, fmt.Errorf("set database permissions: %w", err)
 		}
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, analyticsCache: make(map[analyticsCacheKey]any)}
 	if legacyBackup != "" {
 		version, versionErr := store.SchemaVersion(ctx)
 		if versionErr != nil {

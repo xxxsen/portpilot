@@ -103,6 +103,7 @@ export type NetworkConnection = {
   proxy_id: string;
   proxy_remark: string;
   external_addr: string;
+  external_ip: string;
   server_bind: string;
   target_addr: string;
   transport: string;
@@ -174,6 +175,122 @@ export type NetworkSummary = {
   down_bytes: number;
   series: NetworkPoint[];
   clients: NetworkClient[];
+};
+
+export type AnalyticsRange = {
+  requested: "1h" | "24h" | "7d" | "30d" | "90d" | "custom";
+  effective_from: number;
+  effective_to: number;
+  resolution_seconds: number;
+  timezone: "UTC";
+};
+
+export type AnalyticsScope = {
+  client_id: string;
+  proxy_id: string;
+  protocol: string;
+};
+
+export type AnalyticsCompleteness = {
+  status: "pending" | "backfilling" | "ready" | "degraded" | "unavailable";
+  complete_from: number;
+  statistics_available_from: number;
+  statistics_retention_seconds: number;
+  details_available_from: number;
+  estimated_bytes: number;
+  estimated_ratio: number;
+  geoip_status: "disabled" | "ready" | "degraded";
+  geoip_database_fingerprint: string;
+};
+
+export type AnalyticsMetadata = {
+  range: AnalyticsRange;
+  scope: AnalyticsScope;
+  completeness: AnalyticsCompleteness;
+};
+
+export type AnalyticsPoint = {
+  bucket_at: number;
+  connections: number;
+  failures: number;
+  up_bytes: number;
+  down_bytes: number;
+  estimated_bytes: number;
+};
+
+export type AnalyticsCountry = {
+  geo_kind: string;
+  country_code: string;
+  connections: number;
+  unique_ips: number;
+  up_bytes: number;
+  down_bytes: number;
+  traffic_share: number;
+};
+
+export type AnalyticsOverview = AnalyticsMetadata & {
+  connections: number;
+  failures: number;
+  failure_rate: number;
+  unique_ips: number;
+  countries: number;
+  up_bytes: number;
+  down_bytes: number;
+  estimated_bytes: number;
+  series: AnalyticsPoint[];
+  country_distribution: AnalyticsCountry[];
+};
+
+export type AnalyticsDimension = {
+  client_id: string;
+  client_remark: string;
+  client_deleted: boolean;
+  proxy_id: string;
+  proxy_remark: string;
+  proxy_deleted: boolean;
+  protocol: "tcp" | "udp";
+  connections: number;
+  failures: number;
+  unique_ips: number;
+  countries: number;
+  up_bytes: number;
+  down_bytes: number;
+  top_country_code: string;
+  first_seen_at: number;
+  last_seen_at: number;
+};
+
+export type AnalyticsTopIP = {
+  rank: number;
+  source_ip: string;
+  geo_kind: string;
+  country_code: string;
+  connections: number;
+  failures: number;
+  up_bytes: number;
+  down_bytes: number;
+  connection_share: number;
+  traffic_share: number;
+  first_seen_at: number;
+  last_seen_at: number;
+};
+
+export type AnalyticsTopIPs = AnalyticsMetadata & {
+  by_connections: AnalyticsTopIP[];
+  by_traffic: AnalyticsTopIP[];
+};
+
+export type AnalyticsIPSeries = AnalyticsMetadata & {
+  source_ip: string;
+  geo_kind: string;
+  country_code: string;
+  connections: number;
+  failures: number;
+  up_bytes: number;
+  down_bytes: number;
+  first_seen_at: number;
+  last_seen_at: number;
+  series: AnalyticsPoint[];
 };
 
 export type Summary = {

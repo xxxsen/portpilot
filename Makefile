@@ -39,7 +39,7 @@ ACCEPT_UDP_DATAGRAMS ?= 10000
 .PHONY: help doctor bootstrap web-install build build-server build-client \
 	web-build test test-race integration-test lint lint-go lint-shell migration-check \
 	config-check dockerfile-lint web-lint web-typecheck web-test web-check \
-	web-e2e dev smoke-dev fault-test soak-test ci acceptance clean \
+	web-e2e dev smoke-dev fault-test soak-test analytics-benchmark ci acceptance clean \
 	clean-dev-data build-server-image build-client-image build-web-image build-images
 
 help: ## Show available targets
@@ -166,6 +166,10 @@ soak-test: ## Run concurrent relay load against make dev
 		ACCEPT_TCP_CONCURRENCY="$(ACCEPT_TCP_CONCURRENCY)" ACCEPT_TCP_HOLD_DURATION="$(ACCEPT_TCP_HOLD_DURATION)" \
 		ACCEPT_TCP_CYCLES="$(ACCEPT_TCP_CYCLES)" ACCEPT_UDP_FLOWS="$(ACCEPT_UDP_FLOWS)" \
 		ACCEPT_UDP_DATAGRAMS="$(ACCEPT_UDP_DATAGRAMS)" "$(PROJECT_ROOT)/scripts/soak-test.sh"
+
+analytics-benchmark: ## Benchmark historical analytics at reference cardinality
+	"$(GO)" test ./internal/store -run '^$$' \
+		-bench '^BenchmarkNetworkAnalyticsReferenceScale$$' -benchtime=5x -benchmem
 
 ci: lint build test test-race web-test integration-test ## Run the deterministic CI gate
 

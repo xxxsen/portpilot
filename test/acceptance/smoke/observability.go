@@ -28,6 +28,10 @@ type smokeConnection struct {
 	DownPackets int64  `json:"down_packets"`
 }
 
+type analyticsTopIP struct {
+	SourceIP string `json:"source_ip"`
+}
+
 func smokeObservability(ctx context.Context, adminURL string, since time.Time) error {
 	client, err := smokeAdminClient(ctx, adminURL)
 	if err != nil {
@@ -60,10 +64,10 @@ func smokeObservability(ctx context.Context, adminURL string, since time.Time) e
 			}
 		}
 		if summary.PendingTunnels == 0 && summary.ActiveTunnels == 0 &&
-			summary.UDPChannels >= 2 && summary.UDPFlows >= 2 &&
+			summary.UDPChannels >= 2 && summary.UDPFlows == 0 &&
 			tcpConnections["dev-tcp-echo"] && tcpConnections["dev-tcp-direct"] &&
 			udpFlows >= 2 {
-			return nil
+			return smokeAnalytics(ctx, client, adminURL)
 		}
 		select {
 		case <-ctx.Done():
@@ -75,6 +79,125 @@ func smokeObservability(ctx context.Context, adminURL string, since time.Time) e
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func smokeAnalytics(ctx context.Context, client *http.Client, adminURL string) error {
+	for {
+		var overview struct {
+			Connections int64 `json:"connections"`
+			UniqueIPs   int64 `json:"unique_ips"`
+			UpBytes     int64 `json:"up_bytes"`
+			DownBytes   int64 `json:"down_bytes"`
+			Series      []struct {
+				BucketAt int64 `json:"bucket_at"`
+			} `json:"series"`
+			Completeness struct {
+				Status string `json:"status"`
+			} `json:"completeness"`
+		}
+		if err := smokeGetJSON(
+			ctx,
+			client,
+			adminURL+"/api/network/analytics/overview?range=1h",
+			&overview,
+		); err != nil {
+			return err
+		}
+		if overview.Connections >= 5 &&
+			overview.UniqueIPs >= 2 &&
+			overview.UpBytes > 0 &&
+			overview.DownBytes > 0 &&
+			len(overview.Series) == 12 &&
+			overview.Completeness.Status == "ready" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(
+				"network analytics did not converge: connections=%d unique_ips=%d up=%d down=%d points=%d status=%s",
+				overview.Connections,
+				overview.UniqueIPs,
+				overview.UpBytes,
+				overview.DownBytes,
+				len(overview.Series),
+				overview.Completeness.Status,
+			)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	var dimensions struct {
+		Items []struct {
+			ProxyID string `json:"proxy_id"`
+		} `json:"items"`
+	}
+	if err := smokeGetJSON(
+		ctx,
+		client,
+		adminURL+"/api/network/analytics/dimensions?range=1h&page=1&page_size=25",
+		&dimensions,
+	); err != nil {
+		return err
+	}
+	proxies := make(map[string]bool)
+	for _, item := range dimensions.Items {
+		proxies[item.ProxyID] = true
+	}
+	if !proxies["dev-tcp-echo"] || !proxies["dev-tcp-direct"] || !proxies["dev-udp-echo"] {
+		return fmt.Errorf("analytics dimensions missing proxy: %v", proxies)
+	}
+	var top struct {
+		ByConnections []analyticsTopIP `json:"by_connections"`
+		ByTraffic     []analyticsTopIP `json:"by_traffic"`
+	}
+	if err := smokeGetJSON(
+		ctx,
+		client,
+		adminURL+"/api/network/analytics/top-ips?range=1h&k=10",
+		&top,
+	); err != nil {
+		return err
+	}
+	if !sourceIPPrecedes(top.ByConnections, "127.0.0.2", "127.0.0.3") ||
+		!sourceIPPrecedes(top.ByTraffic, "127.0.0.3", "127.0.0.2") {
+		return fmt.Errorf(
+			"analytics Top IP order mismatch: connections=%#v traffic=%#v",
+			top.ByConnections,
+			top.ByTraffic,
+		)
+	}
+	var series struct {
+		SourceIP    string `json:"source_ip"`
+		Connections int64  `json:"connections"`
+		Series      []struct {
+			BucketAt int64 `json:"bucket_at"`
+		} `json:"series"`
+	}
+	if err := smokeGetJSON(
+		ctx,
+		client,
+		adminURL+"/api/network/analytics/ip-series?range=1h&source_ip=127.0.0.2",
+		&series,
+	); err != nil {
+		return err
+	}
+	if series.SourceIP != "127.0.0.2" || series.Connections < 3 || len(series.Series) != 12 {
+		return fmt.Errorf("analytics IP series mismatch: %#v", series)
+	}
+	return nil
+}
+
+func sourceIPPrecedes(items []analyticsTopIP, first, second string) bool {
+	firstIndex := -1
+	secondIndex := -1
+	for index, item := range items {
+		switch item.SourceIP {
+		case first:
+			firstIndex = index
+		case second:
+			secondIndex = index
+		}
+	}
+	return firstIndex >= 0 && secondIndex >= 0 && firstIndex < secondIndex
 }
 
 func smokeAdminClient(ctx context.Context, adminURL string) (*http.Client, error) {

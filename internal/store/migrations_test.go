@@ -20,7 +20,9 @@ func TestEmbeddedMigrationsAreNamedAndDDLOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "0001_init.sql" {
+	if len(entries) != 2 ||
+		entries[0].Name() != "0001_init.sql" ||
+		entries[1].Name() != "0002_network_history_analytics.sql" {
 		t.Fatalf("unexpected migration files: %#v", entries)
 	}
 	dml := regexp.MustCompile(`(?im)^\s*(insert|update|delete|replace|merge|select)\b`)
@@ -122,6 +124,80 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 	}
 	if created != 0 {
 		t.Fatal("failed migration left partial business schema")
+	}
+}
+
+func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
+	original := migrationFilesystem()
+	t.Cleanup(func() { SetMigrations(original) })
+	initial, err := fs.ReadFile(schemamigrations.FS, "0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	SetMigrations(fstest.MapFS{
+		"0001_init.sql": &fstest.MapFile{Data: initial},
+	})
+	path := filepath.Join(t.TempDir(), "store.db")
+	oldStore, err := Open(path, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = oldStore.db.ExecContext(t.Context(), `INSERT INTO network_connections (
+		activity_id, protocol, state, client_id, proxy_id,
+		external_addr, accepted_at, last_activity_at, closed_at
+	) VALUES (
+		'00000000000000000000000000000001', 'tcp', 'closed', 'client', 'proxy',
+		'192.0.2.1:5000', 1000, 2000, 2000
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	SetMigrations(schemamigrations.FS)
+	upgraded, err := Open(path, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	version, err := upgraded.SchemaVersion(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version=%d, want 2", version)
+	}
+	var externalIP string
+	var aggregatedAt sql.NullInt64
+	err = upgraded.db.QueryRowContext(t.Context(), `SELECT
+		external_ip, analytics_aggregated_at
+		FROM network_connections
+		WHERE activity_id='00000000000000000000000000000001'`,
+	).Scan(&externalIP, &aggregatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if externalIP != "" || aggregatedAt.Valid {
+		t.Fatalf("unexpected migrated connection values: external_ip=%q aggregated_at=%#v", externalIP, aggregatedAt)
+	}
+	for _, table := range []string{
+		"network_history_ip_rollups",
+		"network_history_proxy_dimensions",
+		"network_analytics_meta",
+	} {
+		var found int
+		if err := upgraded.db.QueryRowContext(
+			t.Context(),
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			table,
+		).Scan(&found); err != nil {
+			t.Fatal(err)
+		}
+		if found != 1 {
+			t.Fatalf("migration did not create %s", table)
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 
 var networkRanges = map[string]time.Duration{
 	"1h": time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour,
+	"90d": 90 * 24 * time.Hour,
 }
 
 var activeNetworkStates = map[string]struct{}{

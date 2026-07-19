@@ -91,12 +91,16 @@ type LimitConfig struct {
 }
 
 type ObservabilityConfig struct {
-	AuditRetention         string `json:"audit_retention"`
-	NetworkRetention       string `json:"network_retention"`
-	NetworkSampleRetention string `json:"network_sample_retention"`
-	SampleInterval         string `json:"sample_interval"`
-	CleanupInterval        string `json:"cleanup_interval"`
-	MaxActiveConnections   int    `json:"max_active_connections"`
+	AuditRetention             string `json:"audit_retention"`
+	NetworkRetention           string `json:"network_retention"`
+	NetworkSampleRetention     string `json:"network_sample_retention"`
+	NetworkStatisticsRetention string `json:"network_statistics_retention"`
+	NetworkFineRollupRetention string `json:"network_fine_rollup_retention"`
+	GeoIPCountryDatabase       string `json:"geoip_country_database"`
+	GeoIPReloadInterval        string `json:"geoip_reload_interval"`
+	SampleInterval             string `json:"sample_interval"`
+	CleanupInterval            string `json:"cleanup_interval"`
+	MaxActiveConnections       int    `json:"max_active_connections"`
 }
 
 type ClientFile struct {
@@ -176,8 +180,9 @@ func DefaultServerConfig() ServerConfig {
 		},
 		Observability: ObservabilityConfig{
 			AuditRetention: "4320h", NetworkRetention: "720h",
-			NetworkSampleRetention: "168h", SampleInterval: "10s",
-			CleanupInterval: "1h", MaxActiveConnections: 100000,
+			NetworkSampleRetention: "168h", NetworkStatisticsRetention: "2160h",
+			NetworkFineRollupRetention: "48h", GeoIPReloadInterval: "1h",
+			SampleInterval: "10s", CleanupInterval: "1h", MaxActiveConnections: 100000,
 		},
 	}
 }
@@ -190,6 +195,12 @@ func LoadServer(path string) (ServerConfig, error) {
 	base := filepath.Dir(path)
 	cfg.ClientConfigFile = resolvePath(base, cfg.ClientConfigFile)
 	cfg.DataDB = resolvePath(base, cfg.DataDB)
+	if cfg.Observability.GeoIPCountryDatabase != "" {
+		cfg.Observability.GeoIPCountryDatabase = resolvePath(
+			base,
+			cfg.Observability.GeoIPCountryDatabase,
+		)
+	}
 	if err := cfg.Validate(); err != nil {
 		return ServerConfig{}, fmt.Errorf("validate server config: %w", err)
 	}
@@ -346,6 +357,13 @@ func validateLimits(limits LimitConfig) error {
 }
 
 func validateObservability(value ObservabilityConfig) error {
+	if err := validateObservabilityRetention(value); err != nil {
+		return err
+	}
+	return validateObservabilityRuntime(value)
+}
+
+func validateObservabilityRetention(value ObservabilityConfig) error {
 	audit, err := positiveDuration(value.AuditRetention)
 	if err != nil || audit < 30*24*time.Hour || audit > 730*24*time.Hour {
 		return errors.New("audit_retention must be between 30d and 730d")
@@ -357,6 +375,22 @@ func validateObservability(value ObservabilityConfig) error {
 	samples, err := positiveDuration(value.NetworkSampleRetention)
 	if err != nil || samples < 24*time.Hour || samples > 30*24*time.Hour || samples > network {
 		return errors.New("network_sample_retention must be between 1d and 30d and not exceed network_retention")
+	}
+	statistics, err := positiveDuration(value.NetworkStatisticsRetention)
+	if err != nil || statistics < 30*24*time.Hour || statistics > 365*24*time.Hour {
+		return errors.New("network_statistics_retention must be between 30d and 365d")
+	}
+	fineRollups, err := positiveDuration(value.NetworkFineRollupRetention)
+	if err != nil || fineRollups < 24*time.Hour || fineRollups > 7*24*time.Hour || fineRollups > statistics {
+		return errors.New("network_fine_rollup_retention must be between 1d and 7d and not exceed network_statistics_retention")
+	}
+	return nil
+}
+
+func validateObservabilityRuntime(value ObservabilityConfig) error {
+	geoIPReload, err := positiveDuration(value.GeoIPReloadInterval)
+	if err != nil || geoIPReload < 10*time.Minute || geoIPReload > 24*time.Hour {
+		return errors.New("geoip_reload_interval must be between 10m and 24h")
 	}
 	sampleInterval, err := positiveDuration(value.SampleInterval)
 	if err != nil || sampleInterval < 5*time.Second || sampleInterval > time.Minute {

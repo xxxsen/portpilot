@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
 )
 
@@ -21,12 +23,15 @@ var ErrLimitReached = errors.New("network activity limit reached")
 const rateSampleInterval = time.Second
 
 type Config struct {
-	SampleInterval   time.Duration
-	CleanupInterval  time.Duration
-	AuditRetention   time.Duration
-	NetworkRetention time.Duration
-	SampleRetention  time.Duration
-	MaxActive        int
+	SampleInterval      time.Duration
+	CleanupInterval     time.Duration
+	AuditRetention      time.Duration
+	NetworkRetention    time.Duration
+	SampleRetention     time.Duration
+	StatisticsRetention time.Duration
+	FineRollupRetention time.Duration
+	MaxActive           int
+	GeoIP               *geoip.Resolver
 }
 
 type Start struct {
@@ -42,6 +47,19 @@ type Start struct {
 	SessionEpoch uint64
 }
 
+type Metrics struct {
+	FinalizeSuccess         uint64 `json:"finalize_success"`
+	FinalizeFailure         uint64 `json:"finalize_failure"`
+	FinalizeSkipped         uint64 `json:"finalize_skipped"`
+	FinalizeDurationNanos   int64  `json:"finalize_duration_nanos"`
+	BackfillConnections     uint64 `json:"backfill_connections"`
+	BackfillFailures        uint64 `json:"backfill_failures"`
+	UnaggregatedConnections int64  `json:"unaggregated_connections"`
+	BackfillLagSeconds      int64  `json:"backfill_lag_seconds"`
+	EstimatedBytes          uint64 `json:"estimated_bytes"`
+	SampleOverflow          uint64 `json:"sample_overflow"`
+}
+
 type Handle struct {
 	service *Service
 
@@ -52,6 +70,7 @@ type Handle struct {
 	proxyID      string
 	proxyRemark  string
 	externalAddr string
+	externalIP   string
 	serverBind   string
 	targetAddr   string
 	transport    atomic.Pointer[string]
@@ -92,16 +111,28 @@ type Service struct {
 	config Config
 	logger *slog.Logger
 
-	mu       sync.RWMutex
-	active   map[string]*Handle
-	high     chan writeCommand
-	overflow chan writeCommand
-	low      chan writeCommand
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	closed   atomic.Bool
-	degraded atomic.Bool
+	mu                      sync.RWMutex
+	active                  map[string]*Handle
+	high                    chan writeCommand
+	overflow                chan writeCommand
+	low                     chan writeCommand
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	wg                      sync.WaitGroup
+	closed                  atomic.Bool
+	degraded                atomic.Bool
+	backfillDegraded        atomic.Bool
+	analyticsDegraded       atomic.Bool
+	finalizeSuccess         atomic.Uint64
+	finalizeFailure         atomic.Uint64
+	finalizeSkipped         atomic.Uint64
+	finalizeDurationNanos   atomic.Int64
+	backfillConnections     atomic.Uint64
+	backfillFailures        atomic.Uint64
+	unaggregatedConnections atomic.Int64
+	backfillLagSeconds      atomic.Int64
+	estimatedBytes          atomic.Uint64
+	sampleOverflow          atomic.Uint64
 }
 
 func New(database *store.Store, config Config, logger *slog.Logger) (*Service, error) {
@@ -110,7 +141,8 @@ func New(database *store.Store, config Config, logger *slog.Logger) (*Service, e
 	}
 	if config.SampleInterval <= 0 || config.CleanupInterval <= 0 ||
 		config.AuditRetention <= 0 || config.NetworkRetention <= 0 ||
-		config.SampleRetention <= 0 || config.MaxActive <= 0 {
+		config.SampleRetention <= 0 || config.StatisticsRetention <= 0 ||
+		config.FineRollupRetention <= 0 || config.MaxActive <= 0 {
 		return nil, errors.New("invalid activity service configuration")
 	}
 	if logger == nil {
@@ -125,11 +157,16 @@ func New(database *store.Store, config Config, logger *slog.Logger) (*Service, e
 		low:      make(chan writeCommand, 32768),
 		ctx:      ctx, cancel: cancel,
 	}
-	service.wg.Add(4)
+	if err := database.EnsureAnalyticsMeta(context.Background(), time.Now().UTC().UnixMilli()); err != nil {
+		cancel()
+		return nil, fmt.Errorf("ensure network analytics metadata: %w", err)
+	}
+	service.wg.Add(5)
 	go service.writer()
 	go service.sampler()
 	go service.rateSampler()
 	go service.cleaner()
+	go service.backfill()
 	return service, nil
 }
 
@@ -145,11 +182,16 @@ func (s *Service) Start(input Start) (*Handle, error) {
 		return nil, fmt.Errorf("create activity id: %w", err)
 	}
 	now := time.Now().UTC().UnixMilli()
+	externalIP := "invalid"
+	if ip, ok := geoip.NormalizeExternalIP(input.ExternalAddr); ok {
+		externalIP = ip.String()
+	}
 	handle := &Handle{
 		service: s, activityID: id, protocol: input.Protocol,
 		clientID: input.ClientID, clientRemark: input.ClientRemark,
 		proxyID: input.ProxyID, proxyRemark: input.ProxyRemark,
-		externalAddr: input.ExternalAddr, serverBind: input.ServerBind,
+		externalAddr: input.ExternalAddr, externalIP: externalIP,
+		serverBind:   input.ServerBind,
 		targetAddr:   input.TargetAddr,
 		sessionEpoch: input.SessionEpoch, acceptedAt: now,
 	}
@@ -287,8 +329,15 @@ func (h *Handle) finish(state, reasonCode, reason string) {
 	h.service.sampleHandle(h, true)
 	connection := h.Snapshot()
 	h.service.enqueueHigh("finalize network connection", func(ctx context.Context) error {
-		if err := h.service.store.UpdateNetworkConnection(ctx, connection); err != nil {
+		result, err := h.service.finalizeConnection(ctx, connection)
+		if err != nil {
 			return fmt.Errorf("finalize network connection: %w", err)
+		}
+		if result.SampleOverflow {
+			h.service.logger.Warn(
+				"network analytics samples exceeded terminal counters",
+				"activity_id", connection.ActivityID,
+			)
 		}
 		return nil
 	})
@@ -320,7 +369,8 @@ func (h *Handle) Snapshot() store.NetworkConnection {
 		ActivityID: h.activityID, Protocol: h.protocol, State: state,
 		ClientID: h.clientID, ClientRemark: h.clientRemark,
 		ProxyID: h.proxyID, ProxyRemark: h.proxyRemark,
-		ExternalAddr: h.externalAddr, ServerBind: h.serverBind,
+		ExternalAddr: h.externalAddr, ExternalIP: h.externalIP,
+		ServerBind: h.serverBind,
 		TargetAddr: h.targetAddr, Transport: dereference(h.transport.Load()),
 		SessionEpoch: h.sessionEpoch, AcceptedAt: h.acceptedAt,
 		LastActivityAt: h.lastActivityAt.Load(),
@@ -424,7 +474,8 @@ func (s *Service) Counts() (total int, clients map[string]int) {
 }
 
 func (s *Service) Degraded() bool {
-	return s != nil && s.degraded.Load()
+	return s != nil &&
+		(s.degraded.Load() || s.backfillDegraded.Load() || s.analyticsDegraded.Load())
 }
 
 func (s *Service) sampler() {
@@ -608,9 +659,193 @@ func (s *Service) cleaner() {
 				); err != nil {
 					return fmt.Errorf("clean observability data: %w", err)
 				}
+				if err := s.store.CleanupAnalytics(
+					ctx,
+					now.UTC().UnixMilli(),
+					s.config.FineRollupRetention,
+					s.config.StatisticsRetention,
+				); err != nil {
+					return fmt.Errorf("clean network analytics data: %w", err)
+				}
 				return nil
 			})
 		}
+	}
+}
+
+func (s *Service) backfill() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := s.backfillBatch(); err != nil {
+			if s.ctx.Err() != nil {
+				return
+			}
+			s.backfillDegraded.Store(true)
+			s.logger.Error("network analytics backfill failed", "error", err)
+		} else {
+			s.backfillDegraded.Store(false)
+		}
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Service) backfillBatch() error {
+	ctx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
+	defer cancel()
+	now := time.Now().UTC().UnixMilli()
+	connections, err := s.store.ListUnaggregatedConnections(ctx, 500)
+	if err != nil {
+		_ = s.store.UpdateAnalyticsMeta(ctx, "degraded", 0, 0, err.Error(), now)
+		return fmt.Errorf("list unaggregated network connections: %w", err)
+	}
+	if len(connections) > 0 {
+		if err := s.store.UpdateAnalyticsMeta(ctx, "backfilling", 0, 0, "", now); err != nil {
+			return fmt.Errorf("mark network analytics backfill active: %w", err)
+		}
+	}
+	var processed int64
+	var completeFrom int64
+	for index := range connections {
+		connection := connections[index]
+		if connection.ExternalIP == "" {
+			if ip, ok := geoip.NormalizeExternalIP(connection.ExternalAddr); ok {
+				connection.ExternalIP = ip.String()
+			} else {
+				connection.ExternalIP = "invalid"
+			}
+		}
+		result, aggregateErr := s.finalizeConnection(ctx, connection)
+		if aggregateErr != nil {
+			s.backfillFailures.Add(1)
+			_ = s.store.UpdateAnalyticsMeta(
+				ctx,
+				"degraded",
+				completeFrom,
+				processed,
+				aggregateErr.Error(),
+				time.Now().UTC().UnixMilli(),
+			)
+			return aggregateErr
+		}
+		if result.Aggregated {
+			processed++
+			completeFrom = connection.AcceptedAt
+			s.backfillConnections.Add(1)
+		}
+		runtime.Gosched()
+	}
+	pending, oldest, err := s.store.AnalyticsBackfillState(ctx)
+	if err != nil {
+		return fmt.Errorf("read network analytics backfill state: %w", err)
+	}
+	s.unaggregatedConnections.Store(pending)
+	if pending > 0 && oldest > 0 {
+		s.backfillLagSeconds.Store(max((now-oldest)/1000, 0))
+	} else {
+		s.backfillLagSeconds.Store(0)
+	}
+	status := "backfilling"
+	if pending == 0 {
+		status = "ready"
+		completeFrom = now - s.config.StatisticsRetention.Milliseconds()
+	}
+	err = s.store.UpdateAnalyticsMeta(
+		ctx,
+		status,
+		completeFrom,
+		processed,
+		"",
+		time.Now().UTC().UnixMilli(),
+	)
+	if err != nil {
+		return fmt.Errorf("update network analytics backfill metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) geoClassification(connection store.NetworkConnection) store.GeoClassification {
+	result := geoip.Result{Kind: "invalid"}
+	if connection.ExternalIP != "" && connection.ExternalIP != "invalid" {
+		if ip, ok := geoip.NormalizeExternalIP(connection.ExternalIP); ok {
+			if s.config.GeoIP != nil {
+				result = s.config.GeoIP.Resolve(ip)
+			} else {
+				result = geoip.Result{Kind: "unknown"}
+			}
+		}
+	}
+	return store.GeoClassification{
+		Kind: result.Kind, CountryCode: result.CountryCode,
+		DatabaseFingerprint: result.DatabaseFingerprint,
+	}
+}
+
+func (s *Service) finalizeConnection(
+	ctx context.Context,
+	connection store.NetworkConnection,
+) (store.AnalyticsFinalizeResult, error) {
+	started := time.Now()
+	result, err := s.store.FinalizeNetworkConnectionAndAggregate(
+		ctx,
+		connection,
+		s.geoClassification(connection),
+		time.Now().UTC().UnixMilli(),
+	)
+	s.finalizeDurationNanos.Add(time.Since(started).Nanoseconds())
+	if err != nil {
+		s.finalizeFailure.Add(1)
+		return store.AnalyticsFinalizeResult{}, fmt.Errorf("finalize network analytics: %w", err)
+	}
+	if result.Aggregated {
+		s.finalizeSuccess.Add(1)
+	} else {
+		s.finalizeSkipped.Add(1)
+	}
+	if result.EstimatedBytes > 0 {
+		s.estimatedBytes.Add(uint64(result.EstimatedBytes))
+	}
+	if result.SampleOverflow {
+		s.sampleOverflow.Add(1)
+		s.analyticsDegraded.Store(true)
+	}
+	return result, nil
+}
+
+func (s *Service) AnalyticsMeta(ctx context.Context) (store.AnalyticsMeta, error) {
+	if s == nil {
+		return store.AnalyticsMeta{}, errors.New("activity service is unavailable")
+	}
+	result, err := s.store.AnalyticsMeta(ctx)
+	if err == nil && s.analyticsDegraded.Load() {
+		result.Status = "degraded"
+	}
+	if err != nil {
+		return store.AnalyticsMeta{}, fmt.Errorf("read network analytics metadata: %w", err)
+	}
+	return result, nil
+}
+
+func (s *Service) Metrics() Metrics {
+	if s == nil {
+		return Metrics{}
+	}
+	return Metrics{
+		FinalizeSuccess:         s.finalizeSuccess.Load(),
+		FinalizeFailure:         s.finalizeFailure.Load(),
+		FinalizeSkipped:         s.finalizeSkipped.Load(),
+		FinalizeDurationNanos:   s.finalizeDurationNanos.Load(),
+		BackfillConnections:     s.backfillConnections.Load(),
+		BackfillFailures:        s.backfillFailures.Load(),
+		UnaggregatedConnections: s.unaggregatedConnections.Load(),
+		BackfillLagSeconds:      s.backfillLagSeconds.Load(),
+		EstimatedBytes:          s.estimatedBytes.Load(),
+		SampleOverflow:          s.sampleOverflow.Load(),
 	}
 }
 

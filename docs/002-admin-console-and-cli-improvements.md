@@ -2,9 +2,10 @@
 
 ## 1. 文档定位
 
-本文记录 PortPilot 已实现的管理后台、审计、网络活动、SQLite migration 和命令行契约。
+本文记录 PortPilot 已实现的管理后台、审计、连接活动、SQLite migration 和命令行契约。
 底层控制协议、smux、UDP-over-TCP、listener 与 session 生命周期见
-[`001-portpilot-design.md`](001-portpilot-design.md)。
+[`001-portpilot-design.md`](001-portpilot-design.md)，终态聚合、Top K、GeoIP 和历史洞察
+交互见 [`003-network-history-analytics.md`](003-network-history-analytics.md)。
 
 稳定边界如下：
 
@@ -197,6 +198,13 @@ sample 以独立流量图展示。
 最高、最低刻度以及较长的流量单位不得被容器裁剪。视图、连接栏、客户端、范围、筛选、排序、
 搜索和两个页码保存在 URL query 中，刷新或分享链接后可以恢复，URL 不包含 secret。窄屏实时表
 保留时间、对象和双向速率，历史表保留时间、对象、状态和总流量，其余上下文进入全屏详情。
+
+### 6.3 历史洞察
+
+“网络活动”内部提供“历史洞察 / 连接明细”一级切换，默认进入历史洞察，不在左侧导航新增
+页面。历史洞察只统计终态连接，提供客户端/代理维度、连接数与流量 Top K、国家分类和来源 IP
+曲线。完整统计口径、API、保留与 GeoIP 契约见
+[`003-network-history-analytics.md`](003-network-history-analytics.md)。
 
 ## 7. SQLite migrations
 

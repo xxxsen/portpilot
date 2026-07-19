@@ -24,7 +24,9 @@ fi
 
 mkdir -p "${LOG_DIR}" "${CONFIG_DIR}"
 if [[ -z "${PORTPILOT_DEV_SERVER_CONFIG:-}" ]]; then
-  install -m 0600 "${ROOT}/configs/dev/server.json" "${SERVER_CONFIG}"
+  jq '.data_db = "../portpilot.db"' "${ROOT}/configs/dev/server.json" >"${SERVER_CONFIG}.tmp"
+  chmod 0600 "${SERVER_CONFIG}.tmp"
+  mv "${SERVER_CONFIG}.tmp" "${SERVER_CONFIG}"
   install -m 0600 "${ROOT}/configs/dev/clients.json" "${CONFIG_DIR}/clients.json"
 fi
 if [[ -z "${PORTPILOT_DEV_CLIENT_CONFIG:-}" ]]; then
