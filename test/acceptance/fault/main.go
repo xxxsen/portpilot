@@ -144,8 +144,10 @@ func run() (runErr error) {
 	if err := waitForAudit(ctx, admin, []string{
 		"client_auth_failed", "mux_ticket_rejected",
 		"tcp_ticket_rejected", "udp_ticket_rejected",
-		protocol.ErrTargetDialFailed,
 	}); err != nil {
+		return err
+	}
+	if err := waitForNetworkFailure(ctx, admin, protocol.ErrTargetDialFailed); err != nil {
 		return err
 	}
 	return ensureHealthy(ctx)
@@ -192,7 +194,7 @@ func faultConfiguration(original config.ClientFile) (config.ClientFile, error) {
 		return config.ClientFile{}, err
 	}
 	next.ClientConfig = append(next.ClientConfig, config.ClientConfig{
-		ClientID: faultClient, ClientToken: faultToken, Enabled: true,
+		ClientID: faultClient, ClientToken: faultToken, Remark: "Fault injection client", Enabled: true,
 		ProxyList: []config.ProxyEnvelope{tcp, direct, udp},
 	})
 	return next, nil
@@ -633,13 +635,13 @@ func testRefusedTarget(ctx context.Context) error {
 func waitForAudit(ctx context.Context, admin *adminAPI, reasons []string) error {
 	for {
 		var payload struct {
-			Events []map[string]any `json:"events"`
+			Items []map[string]any `json:"items"`
 		}
-		if err := admin.getJSON(ctx, "/api/events?limit=500", &payload); err != nil {
+		if err := admin.getJSON(ctx, "/api/events?page=1&page_size=100", &payload); err != nil {
 			return err
 		}
 		found := make(map[string]bool, len(reasons))
-		for _, event := range payload.Events {
+		for _, event := range payload.Items {
 			reason, _ := event["reason"].(string)
 			if slices.Contains(reasons, reason) {
 				found[reason] = true
@@ -657,6 +659,36 @@ func waitForAudit(ctx context.Context, admin *adminAPI, reasons []string) error 
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("missing audit reasons: %v", missing)
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+
+func waitForNetworkFailure(ctx context.Context, admin *adminAPI, reasonCode string) error {
+	for {
+		var payload struct {
+			Items []struct {
+				State           string `json:"state"`
+				ProxyID         string `json:"proxy_id"`
+				CloseReasonCode string `json:"close_reason_code"`
+			} `json:"items"`
+		}
+		if err := admin.getJSON(
+			ctx,
+			"/api/network/connections?page=1&page_size=100&query=fault-target-refused",
+			&payload,
+		); err != nil {
+			return err
+		}
+		for _, connection := range payload.Items {
+			if connection.ProxyID == "fault-target-refused" &&
+				connection.State == "failed" && connection.CloseReasonCode == reasonCode {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("missing failed network connection with reason %s", reasonCode)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}

@@ -35,7 +35,7 @@ func (a *App) handleMuxUpgrade(w http.ResponseWriter, r *http.Request) {
 	if handshake.Version != protocol.Version || handshake.Role != "mux" ||
 		session == nil || session.ID != handshake.SessionID || session.Epoch != handshake.SessionEpoch ||
 		!a.Tickets.Consume(handshake.MuxTicket, binding) {
-		a.recordSecurity(handshake.ClientID, "mux_ticket_rejected", map[string]any{"mux_id": handshake.MuxID, "session_epoch": handshake.SessionEpoch})
+		a.recordSecurity(r.Context(), handshake.ClientID, "mux_ticket_rejected", map[string]any{"mux_id": handshake.MuxID, "session_epoch": handshake.SessionEpoch})
 		_ = protocol.WriteJSONFrame(conn, protocol.HandshakeResult{Version: protocol.Version, Type: "MUX_ERROR", Code: protocol.ErrMuxTicketInvalid})
 		return
 	}
@@ -99,7 +99,7 @@ func (a *App) handleMuxStream(ctx context.Context, mux *MuxSession, conn net.Con
 	}
 	switch open.Role {
 	case "tcp-stream":
-		pending, ok := a.Tunnels.Pair(open, conn)
+		pending, ok := a.Tunnels.Pair(ctx, open, conn)
 		if !ok {
 			_ = protocol.WriteJSONFrame(conn, protocol.HandshakeResult{Version: protocol.Version, Type: "STREAM_ERROR", Code: protocol.ErrDataTicketInvalid})
 			return
@@ -111,7 +111,7 @@ func (a *App) handleMuxStream(ctx context.Context, mux *MuxSession, conn net.Con
 		_ = conn.SetDeadline(time.Time{})
 		a.Tunnels.Relay(ctx, pending, conn)
 	case "udp-channel":
-		channel, ok := a.UDP.Pair(open, conn)
+		channel, ok := a.UDP.Pair(ctx, open, conn)
 		if !ok {
 			_ = protocol.WriteJSONFrame(conn, protocol.HandshakeResult{Version: protocol.Version, Type: "STREAM_ERROR", Code: protocol.ErrUDPChannelInvalid})
 			return
@@ -145,7 +145,7 @@ func (a *App) handleDirectUpgrade(w http.ResponseWriter, r *http.Request) {
 	if open.Role != "direct" {
 		return
 	}
-	pending, ok := a.Tunnels.Pair(open, conn)
+	pending, ok := a.Tunnels.Pair(r.Context(), open, conn)
 	if !ok {
 		_ = protocol.WriteJSONFrame(conn, protocol.HandshakeResult{Version: protocol.Version, Type: "STREAM_ERROR", Code: protocol.ErrDataTicketInvalid})
 		return

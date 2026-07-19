@@ -9,7 +9,7 @@ GO := $(LOCAL_GO)
 endif
 export PATH := $(dir $(GO)):$(PATH)
 
-GO_PKGS := ./cmd/... ./internal/... ./test/integration/... ./test/fixtures/... ./test/acceptance/...
+GO_PKGS := ./cmd/... ./internal/... ./migrations/... ./test/integration/... ./test/fixtures/... ./test/acceptance/...
 SERVER_BIN ?= portpilot-server
 CLIENT_BIN ?= portpilot-client
 GOLANGCI_LINT_VERSION ?= v2.12.2
@@ -37,7 +37,7 @@ ACCEPT_UDP_FLOWS ?= 128
 ACCEPT_UDP_DATAGRAMS ?= 10000
 
 .PHONY: help doctor bootstrap web-install build build-server build-client \
-	web-build test test-race integration-test lint lint-go lint-shell \
+	web-build test test-race integration-test lint lint-go lint-shell migration-check \
 	config-check dockerfile-lint web-lint web-typecheck web-test web-check \
 	web-e2e dev smoke-dev fault-test soak-test ci acceptance clean \
 	clean-dev-data build-server-image build-client-image build-web-image build-images
@@ -101,10 +101,10 @@ test-race: ## Run Go tests with the race detector
 integration-test: ## Run Go integration tests with real loopback sockets
 	"$(GO)" test -count=1 ./test/integration/...
 
-lint: lint-go web-lint web-typecheck lint-shell config-check dockerfile-lint ## Run all static gates
+lint: lint-go web-lint web-typecheck lint-shell config-check dockerfile-lint migration-check ## Run all static gates
 
 lint-go: ## Run formatting, module, vet, and golangci-lint gates
-	@files="$$(find cmd internal test -type f -name "*.go" -print)"; \
+	@files="$$(find cmd internal migrations test -type f -name "*.go" -print)"; \
 		unformatted="$$($(PROJECT_ROOT)/bin/gofumpt -l $${files})"; \
 		test -z "$${unformatted}" || { printf "gofumpt required:\n%s\n" "$${unformatted}" >&2; exit 1; }; \
 		unorganized="$$($(PROJECT_ROOT)/bin/goimports -l $${files})"; \
@@ -119,22 +119,33 @@ lint-shell: ## Validate repository shell scripts
 	"$(PROJECT_ROOT)/bin/shfmt" -d -i 2 -ci scripts/*.sh
 
 config-check: ## Validate all development configuration files
-	"$(GO)" run ./cmd/portpilot-server validate-config -config configs/dev/server.json
-	"$(GO)" run ./cmd/portpilot-client validate-config -config configs/dev/client.json
+	"$(GO)" run ./cmd/portpilot-server validate-config --config configs/dev/server.json
+	"$(GO)" run ./cmd/portpilot-client validate-config --config configs/dev/client.json
 	jq -e . configs/dev/server.json configs/dev/clients.json configs/dev/client.json >/dev/null
 	"$(PROJECT_ROOT)/scripts/check-nginx.sh"
+
+migration-check: ## Validate embedded migrations, naming, and DDL ownership
+	@invalid="$$(find migrations -maxdepth 1 -type f -name "*.sql" -printf "%f\n" | grep -Ev '^[0-9]{4}_[a-z0-9_]+\.sql$$' || true)"; \
+		test -z "$${invalid}" || { printf "Invalid migration filename(s):\n%s\n" "$${invalid}" >&2; exit 1; }
+	"$(GO)" test ./migrations/... ./internal/store -run 'Migration|DDL|Schema'
+	@matches="$$(rg -n 'CREATE[[:space:]]+(TABLE|INDEX|VIEW|TRIGGER)|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE' \
+		cmd internal --glob '*.go' --glob '!*_test.go' | grep -v 'schema_migrations' || true)"; \
+		test -z "$${matches}" || { printf "Business DDL must live in migrations/:\n%s\n" "$${matches}" >&2; exit 1; }
 
 dockerfile-lint: ## Statically validate Dockerfiles without running containers
 	"$(PROJECT_ROOT)/bin/hadolint" docker/Dockerfile.server docker/Dockerfile.client web/Dockerfile
 
 web-lint: web-install ## Run Web ESLint with zero warnings
 	npm --prefix "$(PROJECT_ROOT)/web" run lint
+	@matches="$$(rg -n 'window\.(prompt|confirm|alert)[[:space:]]*\(' web \
+		--glob '!node_modules/**' --glob '!.next/**' --glob '!playwright-report/**' || true)"; \
+		test -z "$${matches}" || { printf "Native browser dialogs are forbidden:\n%s\n" "$${matches}" >&2; exit 1; }
 
 web-typecheck: web-install ## Run strict TypeScript checks
 	npm --prefix "$(PROJECT_ROOT)/web" run typecheck
 
 web-test: web-install ## Run Web unit tests
-	npm --prefix "$(PROJECT_ROOT)/web" run test:ci
+	TMPDIR=/tmp npm --prefix "$(PROJECT_ROOT)/web" run test:ci
 
 web-check: web-lint web-typecheck web-test web-build ## Run all Web gates
 
@@ -184,4 +195,3 @@ clean: ## Remove build output while preserving runtime data
 clean-dev-data: ## Remove local runtime data after explicit confirmation
 	@test "$(CONFIRM)" = "yes" || { echo "Run make clean-dev-data CONFIRM=yes" >&2; exit 1; }
 	rm -rf "$(PROJECT_ROOT)/.dev-data"
-

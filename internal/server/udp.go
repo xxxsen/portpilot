@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
@@ -41,12 +43,14 @@ type udpFlow struct {
 	ID         uint64
 	ProxyID    string
 	ClientID   string
+	SessionID  string
 	Connect    string
 	Epoch      uint64
 	Source     *net.UDPAddr
 	Listener   *net.UDPConn
 	ChannelID  string
 	LastActive atomic.Int64
+	Activity   *activity.Handle
 }
 
 type UDPManager struct {
@@ -149,18 +153,18 @@ func (m *UDPManager) expirePending(session *Session, channelID string) {
 	}
 }
 
-func (m *UDPManager) Pair(open protocol.StreamOpen, conn net.Conn) (*UDPChannel, bool) {
+func (m *UDPManager) Pair(ctx context.Context, open protocol.StreamOpen, conn net.Conn) (*UDPChannel, bool) {
 	binding := auth.TicketBinding{
 		ClientID: open.ClientID, SessionID: open.SessionID,
 		SessionEpoch: open.SessionEpoch, Kind: "udp", ObjectID: open.ChannelID,
 	}
 	if !m.app.Tickets.Consume(open.ChannelTicket, binding) {
-		m.app.recordSecurity(open.ClientID, "udp_ticket_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
+		m.app.recordSecurity(ctx, open.ClientID, "udp_ticket_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
 		return nil, false
 	}
 	session := m.app.Sessions.Current(open.ClientID)
 	if session == nil || session.ID != open.SessionID || session.Epoch != open.SessionEpoch {
-		m.app.recordSecurity(open.ClientID, "udp_pair_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
+		m.app.recordSecurity(ctx, open.ClientID, "udp_pair_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
 		return nil, false
 	}
 	validProxy := false
@@ -171,7 +175,7 @@ func (m *UDPManager) Pair(open protocol.StreamOpen, conn net.Conn) (*UDPChannel,
 		}
 	}
 	if !validProxy {
-		m.app.recordSecurity(open.ClientID, "udp_proxy_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
+		m.app.recordSecurity(ctx, open.ClientID, "udp_proxy_rejected", map[string]any{"channel_id": open.ChannelID, "proxy_id": open.ProxyID, "session_epoch": open.SessionEpoch})
 		return nil, false
 	}
 	channel := &UDPChannel{
@@ -217,7 +221,7 @@ func (m *UDPManager) RunChannel(channel *UDPChannel) {
 		case protocol.UDPTypeDataToServer:
 			m.writeResponse(channel, frame)
 		case protocol.UDPTypeFlowClose:
-			m.removeFlow(channel.ProxyID, channel.Epoch, frame.FlowID)
+			m.removeFlow(channel.ProxyID, channel.Epoch, frame.FlowID, "client_flow_close")
 		default:
 			return
 		}
@@ -227,7 +231,7 @@ func (m *UDPManager) RunChannel(channel *UDPChannel) {
 func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn, source *net.UDPAddr, data []byte) {
 	session := m.app.Sessions.Current(runtime.ClientID)
 	if session == nil || session.closed.Load() {
-		m.recordDrop(runtime, "client_offline")
+		m.recordDrop(runtime, source, len(data), "client_offline")
 		return
 	}
 	sourceKey := sourceFlowKey(runtime.ClientID, runtime.Proxy.ProxyID, session.Epoch, source.String())
@@ -238,12 +242,13 @@ func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn,
 		if m.flowCountLocked(runtime.Proxy.ProxyID, session.Epoch) >= m.app.Config.DataPlane.UDP.MaxFlowsPerProxy ||
 			len(m.byID) >= m.app.Config.Limits.MaxUDPFlowsTotal {
 			m.mu.Unlock()
-			m.recordDrop(runtime, "flow_limit")
+			m.recordDrop(runtime, source, len(data), "flow_limit")
 			return
 		}
 		flow = &udpFlow{
 			ID: m.nextFlow.Add(1), ProxyID: runtime.Proxy.ProxyID, ClientID: runtime.ClientID,
-			Connect: runtime.Data.Connect, Epoch: session.Epoch, Source: cloneUDPAddr(source), Listener: listener,
+			SessionID: session.ID, Connect: runtime.Data.Connect, Epoch: session.Epoch,
+			Source: cloneUDPAddr(source), Listener: listener,
 		}
 		m.bySource[sourceKey] = flow
 		m.byID[flowIDKey(flow.ProxyID, flow.Epoch, flow.ID)] = flow
@@ -265,11 +270,29 @@ func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn,
 				delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
 			}
 			m.mu.Unlock()
-			m.recordDrop(runtime, "no_udp_channel")
+			m.recordDrop(runtime, source, len(data), "no_udp_channel")
 			return
 		}
 		channel = available[hashSource(sourceKey)%uint64(len(available))]
 		flow.ChannelID = channel.ID
+	}
+	if created && m.app.Activity != nil {
+		activityHandle, err := m.app.Activity.Start(activity.Start{
+			Protocol: "udp", ClientID: runtime.ClientID, ClientRemark: runtime.ClientRemark,
+			ProxyID: runtime.Proxy.ProxyID, ProxyRemark: runtime.Proxy.Remark,
+			ExternalAddr: source.String(), ServerBind: listener.LocalAddr().String(),
+			TargetAddr: runtime.Data.Connect, Transport: "smux",
+			SessionEpoch: session.Epoch,
+		})
+		if err != nil {
+			delete(m.bySource, sourceKey)
+			delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
+			m.mu.Unlock()
+			m.recordDrop(runtime, source, len(data), "network_activity_limit")
+			return
+		}
+		flow.Activity = activityHandle
+		flow.Activity.Connected()
 	}
 	flow.LastActive.Store(time.Now().UnixNano())
 	frame := protocol.UDPFrame{
@@ -279,12 +302,11 @@ func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn,
 	m.mu.Unlock()
 	select {
 	case channel.send <- frame:
-		m.app.Events.Record(store.Event{
-			Kind: "udp_datagram", ClientID: flow.ClientID, ProxyID: flow.ProxyID,
-			UpBytes: int64(len(data)), Reason: "forwarded",
-		})
+		if flow.Activity != nil {
+			flow.Activity.AddUp(len(data), 1)
+		}
 	default:
-		m.recordDrop(runtime, "queue_full")
+		m.recordDrop(runtime, source, len(data), "queue_full")
 	}
 }
 
@@ -315,10 +337,9 @@ func (m *UDPManager) writeResponse(channel *UDPChannel, frame protocol.UDPFrame)
 	}
 	if _, err := flow.Listener.WriteToUDP(frame.Data, flow.Source); err == nil {
 		flow.LastActive.Store(time.Now().UnixNano())
-		m.app.Events.Record(store.Event{
-			Kind: "udp_datagram", ClientID: flow.ClientID, ProxyID: flow.ProxyID,
-			DownBytes: int64(len(frame.Data)), Reason: "forwarded",
-		})
+		if flow.Activity != nil {
+			flow.Activity.AddDown(len(frame.Data), 1)
+		}
 	}
 }
 
@@ -375,7 +396,7 @@ func (m *UDPManager) removeChannel(channel *UDPChannel) {
 	}
 }
 
-func (m *UDPManager) removeFlow(proxyID string, epoch, id uint64) {
+func (m *UDPManager) removeFlow(proxyID string, epoch, id uint64, reason string) {
 	key := flowIDKey(proxyID, epoch, id)
 	m.mu.Lock()
 	flow := m.byID[key]
@@ -384,6 +405,9 @@ func (m *UDPManager) removeFlow(proxyID string, epoch, id uint64) {
 		delete(m.bySource, sourceFlowKey(flow.ClientID, flow.ProxyID, flow.Epoch, flow.Source.String()))
 	}
 	m.mu.Unlock()
+	if flow != nil && flow.Activity != nil {
+		flow.Activity.Close(reason, reason)
+	}
 }
 
 func (m *UDPManager) flowCountLocked(proxyID string, epoch uint64) int {
@@ -427,10 +451,9 @@ func (m *UDPManager) reaper() {
 					default:
 					}
 				}
-				m.app.Events.Record(store.Event{
-					Kind: "udp_flow", ClientID: flow.ClientID, ProxyID: flow.ProxyID,
-					Reason: "idle_timeout",
-				})
+				if flow.Activity != nil {
+					flow.Activity.Close("idle_timeout", "UDP flow idle timeout")
+				}
 			}
 			m.cleanupStaleChannels()
 		}
@@ -441,6 +464,7 @@ func (m *UDPManager) Close() {
 	m.stopOnce.Do(func() { close(m.stop) })
 	m.mu.Lock()
 	channels := make([]*UDPChannel, 0)
+	flows := make([]*udpFlow, 0, len(m.byID))
 	for _, proxyChannels := range m.channels {
 		for _, channel := range proxyChannels {
 			channels = append(channels, channel)
@@ -448,18 +472,55 @@ func (m *UDPManager) Close() {
 	}
 	m.channels = make(map[string]map[string]*UDPChannel)
 	m.pending = make(map[string]udpPendingChannel)
+	for _, flow := range m.byID {
+		flows = append(flows, flow)
+	}
 	m.bySource = make(map[string]*udpFlow)
 	m.byID = make(map[string]*udpFlow)
 	m.mu.Unlock()
 	for _, channel := range channels {
 		channel.Close()
 	}
+	for _, flow := range flows {
+		if flow.Activity != nil {
+			flow.Activity.Interrupt("server_stop", "server stopped")
+		}
+	}
 }
 
-func (m *UDPManager) recordDrop(runtime ProxyRuntime, reason string) {
-	m.app.Events.Record(store.Event{
-		Kind: "udp_drop", ClientID: runtime.ClientID,
-		ProxyID: runtime.Proxy.ProxyID, Reason: reason,
+func (m *UDPManager) CloseSession(session *Session, reason string) {
+	if session == nil {
+		return
+	}
+	m.mu.Lock()
+	var flows []*udpFlow
+	for key, flow := range m.byID {
+		if flow.ClientID != session.ClientID || flow.SessionID != session.ID || flow.Epoch != session.Epoch {
+			continue
+		}
+		flows = append(flows, flow)
+		delete(m.byID, key)
+		delete(m.bySource, sourceFlowKey(flow.ClientID, flow.ProxyID, flow.Epoch, flow.Source.String()))
+	}
+	m.mu.Unlock()
+	for _, flow := range flows {
+		if flow.Activity != nil {
+			flow.Activity.Interrupt(reason, reason)
+		}
+	}
+}
+
+func (m *UDPManager) recordDrop(runtime ProxyRuntime, source *net.UDPAddr, bytes int, reason string) {
+	sourceAddr := ""
+	if source != nil {
+		sourceAddr = source.String()
+	}
+	m.app.writeAuditBestEffort(context.Background(), store.AuditEvent{
+		Category: "security", EventType: "udp_drop", Outcome: "denied",
+		ActorType: "external", SourceAddr: sourceAddr,
+		ClientID: runtime.ClientID, ProxyID: runtime.Proxy.ProxyID,
+		Summary: "UDP 数据报被丢弃", ReasonCode: reason, Reason: reason,
+		Details: map[string]any{"datagram_bytes": bytes},
 	})
 }
 

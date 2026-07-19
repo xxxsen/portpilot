@@ -1,13 +1,11 @@
 package store
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestEventDatabaseCanBeDeletedAndRebuilt(t *testing.T) {
@@ -18,20 +16,11 @@ func TestEventDatabaseCanBeDeletedAndRebuilt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first.Record(Event{Kind: "tcp_tunnel", ClientID: "client", UpBytes: 12})
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		events, listErr := first.List(t.Context(), 10)
-		if listErr != nil {
-			t.Fatal(listErr)
-		}
-		if len(events) == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("event writer did not flush")
-		}
-		time.Sleep(20 * time.Millisecond)
+	if _, err := first.WriteAudit(t.Context(), AuditEvent{
+		Category: "system", EventType: "system_start", Outcome: "success",
+		ActorType: "system", Summary: "test",
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -51,12 +40,12 @@ func TestEventDatabaseCanBeDeletedAndRebuilt(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	events, err := second.List(context.Background(), 10)
+	events, err := second.ListAudit(t.Context(), AuditQuery{Page: 1, PageSize: 25})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 0 {
-		t.Fatalf("rebuilt event database retained old rows: %#v", events)
+	if events.Total != 0 || len(events.Items) != 0 {
+		t.Fatalf("rebuilt event database retained old rows: %#v", events.Items)
 	}
 }
 

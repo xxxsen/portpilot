@@ -133,10 +133,10 @@ if [[ "${PORTPILOT_DEV_ECHO:-1}" == "1" ]]; then
   "${GO_BIN}" build -o "${DEV_BIN_DIR}/echo" "${ROOT}/test/fixtures/echo"
   start_process "echo" "${LOG_DIR}/echo.log" "${DEV_BIN_DIR}/echo"
 fi
-start_process "server" "${LOG_DIR}/server.log" "${DEV_BIN_DIR}/portpilot-server" -config "${SERVER_CONFIG}" -debug
+start_process "server" "${LOG_DIR}/server.log" "${DEV_BIN_DIR}/portpilot-server" run --config "${SERVER_CONFIG}" --debug
 wait_http "PortPilot server" "${ADMIN_URL}/health/ready"
 
-start_process "client" "${LOG_DIR}/client.log" "${DEV_BIN_DIR}/portpilot-client" -config "${CLIENT_CONFIG}" -debug
+start_process "client" "${LOG_DIR}/client.log" "${DEV_BIN_DIR}/portpilot-client" run --config "${CLIENT_CONFIG}" --debug
 wait_client_active
 
 start_process "web" "${LOG_DIR}/web.log" env PORTPILOT_ADMIN_API="${ADMIN_URL}" npm --prefix "${ROOT}/web" run dev

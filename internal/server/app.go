@@ -12,9 +12,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/store"
+	"github.com/portpilot/portpilot/internal/version"
 )
 
 type App struct {
@@ -27,6 +29,7 @@ type App struct {
 	UDP            *UDPManager
 	Listeners      *ListenerManager
 	Events         *store.Store
+	Activity       *activity.Service
 	Admin          *AdminAuth
 	ControlLimiter *auth.RateLimiter
 	DataLimiter    *auth.RateLimiter
@@ -54,7 +57,7 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 		Config: cfg, ConfigManager: configManager, Logger: logger,
 		Tickets:        auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
 		Challenges:     auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
-		Admin:          NewAdminAuth(cfg.Users, 30*time.Minute, 8*time.Hour, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
+		Admin:          NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
 		ControlLimiter: auth.NewRateLimiter(60, time.Minute),
 		DataLimiter:    auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
 	}
@@ -63,21 +66,82 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 	app.UDP = NewUDPManager(app)
 	app.Listeners = NewListenerManager(app)
 
-	eventStore, storeErr := store.Open(cfg.DataDB, logger)
-	if storeErr != nil {
-		logger.Error("sqlite unavailable; data plane will continue", "error", storeErr)
-		app.storeError.Store(true)
-	} else {
-		app.Events = eventStore
+	eventStore, err := store.Open(cfg.DataDB, logger)
+	if err != nil {
+		return nil, fmt.Errorf("open observability database: %w", err)
 	}
+	app.Events = eventStore
+	if _, err := eventStore.InterruptOpenConnections(
+		context.Background(), time.Now().UTC().UnixMilli(),
+	); err != nil {
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("recover network activity: %w", err)
+	}
+	if _, err := eventStore.ResolvePendingAudits(
+		context.Background(), configManager.Snapshot().Revision,
+	); err != nil {
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("recover pending configuration audits: %w", err)
+	}
+	metadataMigration, err := configManager.EnsureMetadata()
+	if err != nil {
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("migrate client metadata: %w", err)
+	}
+	if len(metadataMigration.ClientIDs) > 0 {
+		if _, err := eventStore.WriteAudit(context.Background(), store.AuditEvent{
+			Category: "config", EventType: "config_metadata_migrated",
+			Outcome: "success", ActorType: "system",
+			Summary: "补全旧客户端配置元数据",
+			Details: map[string]any{
+				"client_ids":  metadataMigration.ClientIDs,
+				"time_source": metadataMigration.TimeSource,
+				"revision":    metadataMigration.Revision,
+			},
+		}); err != nil {
+			_ = eventStore.Close()
+			return nil, fmt.Errorf("audit client metadata migration: %w", err)
+		}
+	}
+	activityService, err := activity.New(eventStore, activity.Config{
+		SampleInterval:   cfg.Duration(cfg.Observability.SampleInterval),
+		CleanupInterval:  cfg.Duration(cfg.Observability.CleanupInterval),
+		AuditRetention:   cfg.Duration(cfg.Observability.AuditRetention),
+		NetworkRetention: cfg.Duration(cfg.Observability.NetworkRetention),
+		SampleRetention:  cfg.Duration(cfg.Observability.NetworkSampleRetention),
+		MaxActive:        cfg.Observability.MaxActiveConnections,
+	}, logger)
+	if err != nil {
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("initialize network activity: %w", err)
+	}
+	app.Activity = activityService
 	commit, _, err := app.Listeners.Prepare(configManager.Snapshot())
 	if err != nil {
+		activityService.Close()
 		if eventStore != nil {
 			_ = eventStore.Close()
 		}
 		return nil, fmt.Errorf("prepare proxy listeners: %w", err)
 	}
 	commit()
+	schemaVersion, err := eventStore.SchemaVersion(context.Background())
+	if err != nil {
+		activityService.Close()
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("read migration version: %w", err)
+	}
+	if _, err := eventStore.WriteAudit(context.Background(), store.AuditEvent{
+		Category: "system", EventType: "system_start", Outcome: "success",
+		ActorType: "system", Summary: "PortPilot 服务启动",
+		Details: map[string]any{
+			"version": version.String(), "migration_version": schemaVersion,
+		},
+	}); err != nil {
+		activityService.Close()
+		_ = eventStore.Close()
+		return nil, fmt.Errorf("audit system start: %w", err)
+	}
 
 	app.adminServer = &http.Server{
 		Addr: cfg.AdminAddr, Handler: app.adminMux(),
@@ -124,8 +188,14 @@ func (a *App) Close(parent context.Context) error {
 		a.Sessions.CloseAll()
 		a.Listeners.Close()
 		a.UDP.Close()
+		a.Activity.Close()
 		adminErr := a.adminServer.Shutdown(ctx)
 		dataErr := a.dataServer.Shutdown(ctx)
+		a.writeAuditBestEffort(ctx, store.AuditEvent{
+			Category: "system", EventType: "system_stop", Outcome: "success",
+			ActorType: "system", Summary: "PortPilot 服务停止", ReasonCode: "shutdown",
+			Details: map[string]any{"version": version.String()},
+		})
 		storeErr := a.Events.Close()
 		result = errors.Join(adminErr, dataErr, storeErr)
 	})
@@ -137,7 +207,9 @@ func (a *App) Ready() bool {
 }
 
 func (a *App) Degraded() bool {
-	return a.storeError.Load() || (a.Events != nil && a.Events.Degraded())
+	return a.storeError.Load() ||
+		(a.Events != nil && a.Events.Degraded()) ||
+		(a.Activity != nil && a.Activity.Degraded())
 }
 
 func (a *App) serveData(w http.ResponseWriter, r *http.Request) {

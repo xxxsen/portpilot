@@ -57,7 +57,9 @@ func newChaosAdmin(ctx context.Context) (*chaosAdmin, error) {
 		ctx,
 		http.MethodPost,
 		"/api/auth/login",
-		map[string]string{"user_name": "admin", "password": "admin"},
+		map[string]string{
+			"user_name": "admin", "password": "admin", "session_ttl": "24h",
+		},
 		"",
 		&login,
 	); err != nil {

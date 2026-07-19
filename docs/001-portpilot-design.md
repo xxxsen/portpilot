@@ -4,7 +4,8 @@
 
 PortPilot 是一个由服务端集中管理代理规则、由客户端访问内网目标的反向代理系统。
 
-本文记录已经落地且需要长期保持的架构、协议、安全和运行时契约。具体默认参数以配置校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
+本文记录已经落地且需要长期保持的架构、协议、安全和运行时契约。管理后台、审计、网络活动、SQLite migration 和 CLI 的详细契约见
+[`002-admin-console-and-cli-improvements.md`](002-admin-console-and-cli-improvements.md)。具体默认参数以配置校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
 
 核心边界：
 
@@ -104,7 +105,7 @@ PortPilot 使用三类配置：
 | --- | --- |
 | `admin_addr` | 管理 API 和健康检查监听地址 |
 | `server_addr` | 控制、smux 和 direct 入口监听地址 |
-| `trusted_proxies` | 允许提供真实来源信息的代理 CIDR |
+| `trusted_proxy_cidrs` | 允许提供真实来源信息的代理 CIDR |
 | `users` | 管理员账号和 bcrypt password hash |
 | `client_config_file` | 客户端与代理配置文件路径 |
 | `data_db` | SQLite 路径 |
@@ -128,7 +129,10 @@ PortPilot 使用三类配置：
     {
       "client_id": "office-a",
       "client_token": "<random-secret>",
+      "remark": "Office A",
       "enabled": true,
+      "created_at": 1784449800000,
+      "updated_at": 1784449800000,
       "proxy_list": [
         {
           "proxy_id": "office-a-ssh",
@@ -164,6 +168,8 @@ PortPilot 使用三类配置：
 
 - `client_id` 和 `proxy_id` 必须全局唯一且不依赖数组下标。
 - `client_token` 必须由密码学安全随机数生成，不能使用短口令。
+- `remark` 是客户端的必填可读名称。
+- `created_at` 和 `updated_at` 是服务端权威的 Unix 毫秒时间戳。
 - `kind` 由服务端进行强类型分派；未知类型拒绝。
 - `network` 只允许 `tcp` 或 `udp`。
 - TCP transport 为 `auto`、`smux` 或 `direct`。
@@ -253,7 +259,7 @@ HMAC 只证明客户端持有 token，不提供加密，因此客户端到 Nginx
 - Cookie 使用 `HttpOnly`、`Secure` 和严格 SameSite 策略。
 - 所有管理写请求需要 CSRF 校验。
 - 登录同时按来源和账号限流。
-- session 具有空闲和绝对超时。
+- 登录时从 10 分钟、30 分钟、1 小时和 24 小时中选择绝对有效期；访问 API 不滑动续期。
 - 登录、退出、配置更新、token 轮换、代理启停和主动断开写入审计。
 
 ## 5. 应用协议
@@ -584,11 +590,12 @@ revision 不匹配返回 conflict。校验、预绑定或写文件失败时继�
 服务端启动顺序：
 
 1. 严格加载主配置和客户端配置。
-2. 初始化或重建 SQLite。
-3. 构建 DesiredConfig。
-4. reconcile TCP/UDP listener。
-5. 启动管理和控制/数据入口。
-6. 等待客户端重连并重建 session、mux 和 UDP channel。
+2. 执行 SQLite migrations、完整性检查和旧库重建。
+3. 恢复 pending 审计和未结束网络活动，并补全旧客户端元数据。
+4. 构建 DesiredConfig。
+5. reconcile TCP/UDP listener。
+6. 启动管理和控制/数据入口。
+7. 等待客户端重连并重建 session、mux 和 UDP channel。
 
 session、ticket、tunnel、channel 和 flow 是易失运行态，不从 SQLite 恢复。
 
@@ -671,11 +678,12 @@ SQLite 不能保存：
 
 - 管理员登录、当前会话和退出。
 - 客户端在线状态、epoch、mux 和 stream 状态。
-- 客户端与代理配置的查询和 revision-safe 更新。
+- 客户端备注、创建/修改时间及代理配置的查询和 revision-safe 更新。
 - TCP smux、TCP direct 和 UDP-over-TCP 代理配置。
 - client token 一次性轮换和旧会话失效。
 - 主动断开客户端。
-- 访问、流量、安全和管理审计。
+- 整体/客户端网络活动、连接生命周期、上下行流量和详情。
+- 可筛选、分页、包含脱敏上下文和配置差异的事件与审计。
 - 运行时聚合指标。
 
 所有服务端写接口同时要求管理员 session 和 CSRF。配置写入使用 expected revision，冲突时由调用方刷新后重新决策，不能覆盖他人的更新。

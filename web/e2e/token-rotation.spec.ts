@@ -1,7 +1,6 @@
 import {expect, test, type Page} from "@playwright/test";
 
 const clientId = "e2e-token-client";
-const initialToken = "e2e-initial-token-0123456789abcdef0123456789abcdef";
 
 async function login(page: Page) {
   await page.goto("/");
@@ -23,10 +22,13 @@ async function currentConfig(page: Page) {
   return response.json() as Promise<{
     revision: number;
     client_config: Array<{
-      client_id: string;
-      client_token: string;
-      enabled: boolean;
-      proxy_list: [];
+    client_id: string;
+    client_token: string;
+    remark: string;
+    enabled: boolean;
+    created_at: number;
+    updated_at: number;
+    proxy_list: [];
     }>;
   }>;
 }
@@ -43,45 +45,51 @@ async function saveConfig(
   expect(response.ok()).toBeTruthy();
 }
 
-test("client token rotation is one-time, redacted, and audited", async ({page}, testInfo) => {
+test("client creation and token rotation are one-time, redacted, and audited", async ({page}, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "configuration mutation runs once");
   await login(page);
   const {csrf_token: csrf} = await session(page);
   const setup = await currentConfig(page);
-  setup.client_config = setup.client_config.filter((client) => client.client_id !== clientId);
-  setup.client_config.push({
-    client_id: clientId,
-    client_token: initialToken,
-    enabled: true,
-    proxy_list: [],
-  });
-  await saveConfig(page, csrf, setup);
+  const withoutFixture = setup.client_config.filter((client) => client.client_id !== clientId);
+  if (withoutFixture.length !== setup.client_config.length) {
+    setup.client_config = withoutFixture;
+    await saveConfig(page, csrf, setup);
+  }
 
   try {
     await page.reload();
     await page.getByRole("button", {name: "客户端"}).click();
-    const rotatedToken = new Promise<string>((resolve) => {
-      page.on("dialog", async (dialog) => {
-        if (dialog.type() === "confirm") {
-          await dialog.accept();
-          return;
-        }
-        resolve(dialog.defaultValue());
-        await dialog.dismiss();
-      });
-    });
+    await page.getByRole("button", {name: "新增客户端"}).click();
+    const createDialog = page.getByRole("dialog", {name: "新增客户端"});
+    await createDialog.getByLabel("客户端 ID").fill(clientId);
+    await createDialog.getByLabel("备注").fill("E2E token client");
+    await createDialog.getByRole("button", {name: "保存"}).click();
+    const createdSecretDialog = page.getByRole("dialog", {name: "一次性客户端密钥"});
+    await expect(createdSecretDialog).toBeVisible();
+    await createdSecretDialog.getByRole("button", {name: "显示"}).click();
+    await expect(createdSecretDialog.locator("code")).toHaveText(/^[A-Za-z0-9_-]{43}$/);
+    await createdSecretDialog.getByRole("button", {name: "我已保存"}).click();
+
     const row = page.locator(".client-row").filter({hasText: clientId});
-    await row.getByRole("button", {name: `轮换 ${clientId} Token`}).click();
-    await expect(rotatedToken).resolves.toMatch(/^[A-Za-z0-9_-]{43}$/);
+    await expect(row).toBeVisible();
+    await expect(row).toContainText("创建");
+    await expect(row).toContainText("修改");
+    await row.getByRole("button", {name: `轮换 ${clientId} 密钥`}).click();
+    await page.getByRole("button", {name: "确认轮换"}).click();
+    const secretDialog = page.getByRole("dialog", {name: "一次性客户端密钥"});
+    await expect(secretDialog).toBeVisible();
+    await secretDialog.getByRole("button", {name: "显示"}).click();
+    await expect(secretDialog.locator("code")).toHaveText(/^[A-Za-z0-9_-]{43}$/);
+    await secretDialog.getByRole("button", {name: "我已保存"}).click();
 
     const redacted = await currentConfig(page);
     expect(redacted.client_config.find((client) => client.client_id === clientId)?.client_token)
       .toBe("__REDACTED__");
     await expect.poll(async () => {
-      const response = await page.request.get("/backend/api/events?limit=100");
+      const response = await page.request.get("/backend/api/events?page=1&page_size=100");
       if (!response.ok()) return false;
-      const payload = await response.json() as {events: Array<{kind: string; client_id: string}>};
-      return payload.events.some((event) => event.kind === "client_token_rotated" && event.client_id === clientId);
+      const payload = await response.json() as {items: Array<{event_type: string; client_id: string}>};
+      return payload.items.some((event) => event.event_type === "client_token_rotated" && event.client_id === clientId);
     }, {timeout: 5000}).toBe(true);
   } finally {
     const cleanup = await currentConfig(page);

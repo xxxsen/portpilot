@@ -17,5 +17,4 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/portpilot-client /usr/local/bin/portpilot-client
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/portpilot-client"]
-CMD ["-config", "/etc/portpilot/client.json"]
-
+CMD ["run", "--config", "/etc/portpilot/client.json"]

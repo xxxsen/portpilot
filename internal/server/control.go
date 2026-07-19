@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,7 +25,7 @@ var controlUpgrader = websocket.Upgrader{
 func (a *App) handleControl(w http.ResponseWriter, r *http.Request) {
 	source := a.requestSource(r)
 	if a.ControlLimiter != nil && !a.ControlLimiter.Allow(source) {
-		a.recordSecurity("", "control_rate_limited", map[string]any{"source": source})
+		a.recordSecurity(r.Context(), "", "control_rate_limited", map[string]any{"source": source})
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
@@ -38,7 +39,7 @@ func (a *App) handleControl(w http.ResponseWriter, r *http.Request) {
 
 	clientID, err := a.authenticateControl(conn)
 	if err != nil {
-		a.recordSecurity(clientID, "client_auth_failed", map[string]any{"source": source})
+		a.recordSecurity(r.Context(), clientID, "client_auth_failed", map[string]any{"source": source})
 		a.writeAuthFailure(conn)
 		return
 	}
@@ -53,11 +54,31 @@ func (a *App) handleControl(w http.ResponseWriter, r *http.Request) {
 	if err := conn.WriteJSON(a.authOKMessage(session)); err != nil {
 		return
 	}
-	a.Events.Record(store.Event{
-		Kind: "client_session", ClientID: session.ClientID,
-		Reason: "authenticated", Metadata: map[string]any{"epoch": session.Epoch},
-	})
+	a.writeAuditBestEffort(r.Context(), clientSessionAudit(
+		session, source, "success", "online", "客户端会话上线",
+	))
 	a.runControlSession(session)
+	a.writeAuditBestEffort(context.WithoutCancel(r.Context()), clientSessionAudit(
+		session, source, "success", "offline", "客户端会话下线",
+	))
+}
+
+func clientSessionAudit(
+	session *Session,
+	source, outcome, reasonCode, summary string,
+) store.AuditEvent {
+	sessionID := session.ID
+	if len(sessionID) > 8 {
+		sessionID = sessionID[:8]
+	}
+	return store.AuditEvent{
+		Category: "client", EventType: "client_session", Outcome: outcome,
+		ActorType: "client", ActorID: session.ClientID, SourceAddr: source,
+		ClientID: session.ClientID, Summary: summary, ReasonCode: reasonCode,
+		Details: map[string]any{
+			"epoch": session.Epoch, "session_id_prefix": sessionID,
+		},
+	}
 }
 
 func (a *App) authenticateControl(conn *websocket.Conn) (string, error) {

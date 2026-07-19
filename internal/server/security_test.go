@@ -49,7 +49,7 @@ func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
 		Events: events, Tickets: auth.NewTicketStore(time.Minute),
 	}
 	manager := NewTunnelManager(app)
-	if _, ok := manager.Pair(protocol.StreamOpen{
+	if _, ok := manager.Pair(t.Context(), protocol.StreamOpen{
 		ClientID: "client", SessionID: "session", SessionEpoch: 7,
 		ConnectionID: "connection", DataTicket: "invalid",
 	}, nil); ok {
@@ -57,13 +57,16 @@ func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		items, listErr := events.List(t.Context(), 10)
+		page, listErr := events.ListAudit(t.Context(), store.AuditQuery{
+			Page: 1, PageSize: 25, EventType: "security",
+		})
 		if listErr != nil {
 			t.Fatal(listErr)
 		}
-		if len(items) > 0 {
-			if items[0]["kind"] != "security" || items[0]["reason"] != "tcp_ticket_rejected" {
-				t.Fatalf("unexpected security event: %#v", items[0])
+		if len(page.Items) > 0 {
+			if page.Items[0].EventType != "security" ||
+				page.Items[0].ReasonCode != "tcp_ticket_rejected" {
+				t.Fatalf("unexpected security event: %#v", page.Items[0])
 			}
 			return
 		}

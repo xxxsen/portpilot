@@ -1,7 +1,7 @@
 {
   "admin_addr": "127.0.0.1:5100",
   "server_addr": "127.0.0.1:6100",
-  "trusted_proxies": [
+  "trusted_proxy_cidrs": [
     "127.0.0.1/32"
   ],
   "users": [
@@ -54,6 +54,13 @@
     "max_admin_login_attempts_per_minute": 100,
     "max_mux_sessions_total": 4096,
     "max_udp_flows_total": 65536
+  },
+  "observability": {
+    "audit_retention": "4320h",
+    "network_retention": "720h",
+    "network_sample_retention": "168h",
+    "sample_interval": "10s",
+    "cleanup_interval": "1h",
+    "max_active_connections": 100000
   }
 }
-

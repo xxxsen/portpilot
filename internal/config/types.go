@@ -10,9 +10,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -20,16 +22,17 @@ import (
 const RedactionMarker = "__REDACTED__"
 
 type ServerConfig struct {
-	AdminAddr        string             `json:"admin_addr"`
-	ServerAddr       string             `json:"server_addr"`
-	TrustedProxies   []string           `json:"trusted_proxies"`
-	Users            []User             `json:"users"`
-	ClientConfigFile string             `json:"client_config_file"`
-	DataDB           string             `json:"data_db"`
-	TargetPolicy     TargetPolicyConfig `json:"target_policy"`
-	DataPlane        DataPlaneConfig    `json:"data_plane"`
-	Timeouts         TimeoutConfig      `json:"timeouts"`
-	Limits           LimitConfig        `json:"limits"`
+	AdminAddr        string              `json:"admin_addr"`
+	ServerAddr       string              `json:"server_addr"`
+	TrustedProxies   []string            `json:"trusted_proxy_cidrs"`
+	Users            []User              `json:"users"`
+	ClientConfigFile string              `json:"client_config_file"`
+	DataDB           string              `json:"data_db"`
+	TargetPolicy     TargetPolicyConfig  `json:"target_policy"`
+	DataPlane        DataPlaneConfig     `json:"data_plane"`
+	Timeouts         TimeoutConfig       `json:"timeouts"`
+	Limits           LimitConfig         `json:"limits"`
+	Observability    ObservabilityConfig `json:"observability"`
 }
 
 type User struct {
@@ -87,6 +90,15 @@ type LimitConfig struct {
 	MaxUDPFlowsTotal               int `json:"max_udp_flows_total"`
 }
 
+type ObservabilityConfig struct {
+	AuditRetention         string `json:"audit_retention"`
+	NetworkRetention       string `json:"network_retention"`
+	NetworkSampleRetention string `json:"network_sample_retention"`
+	SampleInterval         string `json:"sample_interval"`
+	CleanupInterval        string `json:"cleanup_interval"`
+	MaxActiveConnections   int    `json:"max_active_connections"`
+}
+
 type ClientFile struct {
 	Revision     uint64         `json:"revision"`
 	ClientConfig []ClientConfig `json:"client_config"`
@@ -95,7 +107,10 @@ type ClientFile struct {
 type ClientConfig struct {
 	ClientID    string          `json:"client_id"`
 	ClientToken string          `json:"client_token"`
+	Remark      string          `json:"remark"`
 	Enabled     bool            `json:"enabled"`
+	CreatedAt   int64           `json:"created_at"`
+	UpdatedAt   int64           `json:"updated_at"`
 	ProxyList   []ProxyEnvelope `json:"proxy_list"`
 }
 
@@ -128,7 +143,7 @@ func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		AdminAddr:      "127.0.0.1:5100",
 		ServerAddr:     "127.0.0.1:6100",
-		TrustedProxies: []string{"127.0.0.1/32"},
+		TrustedProxies: []string{},
 		DataPlane: DataPlaneConfig{
 			DefaultTransport: "auto",
 			DirectFallback:   true,
@@ -158,6 +173,11 @@ func DefaultServerConfig() ServerConfig {
 			MaxAdminLoginAttemptsPerMinute: 10,
 			MaxControlMessageBytes:         65536, MaxMuxSessionsTotal: 4096,
 			MaxUDPFlowsTotal: 65536,
+		},
+		Observability: ObservabilityConfig{
+			AuditRetention: "4320h", NetworkRetention: "720h",
+			NetworkSampleRetention: "168h", SampleInterval: "10s",
+			CleanupInterval: "1h", MaxActiveConnections: 100000,
 		},
 	}
 }
@@ -239,7 +259,10 @@ func (c ServerConfig) Validate() error {
 	if err := validateTimeouts(c); err != nil {
 		return err
 	}
-	return validateLimits(c.Limits)
+	if err := validateLimits(c.Limits); err != nil {
+		return err
+	}
+	return validateObservability(c.Observability)
 }
 
 func validateUsers(users []User) error {
@@ -322,57 +345,139 @@ func validateLimits(limits LimitConfig) error {
 	return nil
 }
 
+func validateObservability(value ObservabilityConfig) error {
+	audit, err := positiveDuration(value.AuditRetention)
+	if err != nil || audit < 30*24*time.Hour || audit > 730*24*time.Hour {
+		return errors.New("audit_retention must be between 30d and 730d")
+	}
+	network, err := positiveDuration(value.NetworkRetention)
+	if err != nil || network < 24*time.Hour || network > 365*24*time.Hour {
+		return errors.New("network_retention must be between 1d and 365d")
+	}
+	samples, err := positiveDuration(value.NetworkSampleRetention)
+	if err != nil || samples < 24*time.Hour || samples > 30*24*time.Hour || samples > network {
+		return errors.New("network_sample_retention must be between 1d and 30d and not exceed network_retention")
+	}
+	sampleInterval, err := positiveDuration(value.SampleInterval)
+	if err != nil || sampleInterval < 5*time.Second || sampleInterval > time.Minute {
+		return errors.New("sample_interval must be between 5s and 60s")
+	}
+	cleanupInterval, err := positiveDuration(value.CleanupInterval)
+	if err != nil || cleanupInterval < 10*time.Minute || cleanupInterval > 24*time.Hour {
+		return errors.New("cleanup_interval must be between 10m and 24h")
+	}
+	if value.MaxActiveConnections < 1000 || value.MaxActiveConnections > 1000000 {
+		return errors.New("max_active_connections must be between 1000 and 1000000")
+	}
+	return nil
+}
+
+var clientIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 func (c ClientFile) Validate(adminAddr, serverAddr string) error {
+	return c.validate(adminAddr, serverAddr, true)
+}
+
+func (c ClientFile) ValidateStrict(adminAddr, serverAddr string) error {
+	return c.validate(adminAddr, serverAddr, false)
+}
+
+func (c ClientFile) validate(adminAddr, serverAddr string, allowLegacyMetadata bool) error {
 	clientIDs := map[string]struct{}{}
 	proxyIDs := map[string]struct{}{}
-	ports := map[int]string{}
-	for _, addr := range []string{adminAddr, serverAddr} {
-		if addr == "" {
-			continue
-		}
-		_, port, err := net.SplitHostPort(addr)
-		if err == nil {
-			n, _ := strconv.Atoi(port)
-			ports[n] = "reserved service port"
-		}
-	}
+	ports := reservedPorts(adminAddr, serverAddr)
 	for _, client := range c.ClientConfig {
-		if client.ClientID == "" {
-			return errors.New("client_id is required")
-		}
-		if _, ok := clientIDs[client.ClientID]; ok {
-			return fmt.Errorf("duplicate client_id %q", client.ClientID)
-		}
-		clientIDs[client.ClientID] = struct{}{}
-		if err := ValidateToken(client.ClientToken); err != nil {
-			return fmt.Errorf("client %s: %w", client.ClientID, err)
+		if err := validateClientIdentity(client, clientIDs, allowLegacyMetadata); err != nil {
+			return err
 		}
 		for _, proxy := range client.ProxyList {
-			if proxy.ProxyID == "" {
-				return errors.New("proxy_id is required")
+			if err := validateProxyBinding(proxy, proxyIDs, ports); err != nil {
+				return err
 			}
-			if _, ok := proxyIDs[proxy.ProxyID]; ok {
-				return fmt.Errorf("duplicate proxy_id %q", proxy.ProxyID)
-			}
-			proxyIDs[proxy.ProxyID] = struct{}{}
-			if proxy.Kind != "tunnel" {
-				return fmt.Errorf("proxy %s: unsupported kind %q", proxy.ProxyID, proxy.Kind)
-			}
-			tunnel, err := proxy.Tunnel()
-			if err != nil {
-				return fmt.Errorf("proxy %s: %w", proxy.ProxyID, err)
-			}
-			_, bindPort, err := net.SplitHostPort(tunnel.Bind)
-			if err != nil {
-				return fmt.Errorf("proxy %s invalid bind: %w", proxy.ProxyID, err)
-			}
-			port, _ := strconv.Atoi(bindPort)
-			if previous, ok := ports[port]; ok {
-				return fmt.Errorf("proxy %s port %d conflicts with %s", proxy.ProxyID, port, previous)
-			}
-			ports[port] = proxy.ProxyID
 		}
 	}
+	return nil
+}
+
+func reservedPorts(addresses ...string) map[int]string {
+	ports := map[int]string{}
+	for _, address := range addresses {
+		if address == "" {
+			continue
+		}
+		_, port, err := net.SplitHostPort(address)
+		if err == nil {
+			value, _ := strconv.Atoi(port)
+			ports[value] = "reserved service port"
+		}
+	}
+	return ports
+}
+
+func validateClientIdentity(
+	client ClientConfig,
+	clientIDs map[string]struct{},
+	allowLegacyMetadata bool,
+) error {
+	if len(client.ClientID) > 64 || !clientIDPattern.MatchString(client.ClientID) {
+		return fmt.Errorf("invalid client_id %q", client.ClientID)
+	}
+	if _, ok := clientIDs[client.ClientID]; ok {
+		return fmt.Errorf("duplicate client_id %q", client.ClientID)
+	}
+	clientIDs[client.ClientID] = struct{}{}
+	if err := ValidateToken(client.ClientToken); err != nil {
+		return fmt.Errorf("client %s: %w", client.ClientID, err)
+	}
+	remark := strings.TrimSpace(client.Remark)
+	legacyMetadata := remark == "" || client.CreatedAt == 0 || client.UpdatedAt == 0
+	if !allowLegacyMetadata || !legacyMetadata {
+		if remark == "" || utf8.RuneCountInString(remark) > 200 {
+			return fmt.Errorf("client %s: remark must contain 1 to 200 characters", client.ClientID)
+		}
+		if client.CreatedAt <= 0 || client.UpdatedAt <= 0 || client.UpdatedAt < client.CreatedAt {
+			return fmt.Errorf("client %s: invalid created_at/updated_at Unix milliseconds", client.ClientID)
+		}
+		return nil
+	}
+	if remark != "" && utf8.RuneCountInString(remark) > 200 {
+		return fmt.Errorf("client %s: remark must not exceed 200 characters", client.ClientID)
+	}
+	if client.CreatedAt < 0 || client.UpdatedAt < 0 ||
+		(client.CreatedAt > 0 && client.UpdatedAt > 0 && client.UpdatedAt < client.CreatedAt) {
+		return fmt.Errorf("client %s: invalid legacy created_at/updated_at values", client.ClientID)
+	}
+	return nil
+}
+
+func validateProxyBinding(
+	proxy ProxyEnvelope,
+	proxyIDs map[string]struct{},
+	ports map[int]string,
+) error {
+	if proxy.ProxyID == "" {
+		return errors.New("proxy_id is required")
+	}
+	if _, ok := proxyIDs[proxy.ProxyID]; ok {
+		return fmt.Errorf("duplicate proxy_id %q", proxy.ProxyID)
+	}
+	proxyIDs[proxy.ProxyID] = struct{}{}
+	if proxy.Kind != "tunnel" {
+		return fmt.Errorf("proxy %s: unsupported kind %q", proxy.ProxyID, proxy.Kind)
+	}
+	tunnel, err := proxy.Tunnel()
+	if err != nil {
+		return fmt.Errorf("proxy %s: %w", proxy.ProxyID, err)
+	}
+	_, bindPort, err := net.SplitHostPort(tunnel.Bind)
+	if err != nil {
+		return fmt.Errorf("proxy %s invalid bind: %w", proxy.ProxyID, err)
+	}
+	port, _ := strconv.Atoi(bindPort)
+	if previous, ok := ports[port]; ok {
+		return fmt.Errorf("proxy %s port %d conflicts with %s", proxy.ProxyID, port, previous)
+	}
+	ports[port] = proxy.ProxyID
 	return nil
 }
 

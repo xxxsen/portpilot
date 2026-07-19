@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -56,6 +59,12 @@ func (m *Manager) Snapshot() ClientFile {
 
 type PrepareFunc func(ClientFile) (commit func(), abort func(), err error)
 
+type MetadataMigration struct {
+	ClientIDs  []string
+	TimeSource string
+	Revision   uint64
+}
+
 func (m *Manager) Replace(expectedRevision uint64, next ClientFile, prepare PrepareFunc) (ClientFile, error) {
 	m.writeMu.Lock()
 	defer m.writeMu.Unlock()
@@ -84,8 +93,9 @@ func (m *Manager) Replace(expectedRevision uint64, next ClientFile, prepare Prep
 		return ClientFile{}, ErrRevisionConflict
 	}
 	preserveRedactionMarkers(&next, latest)
+	normalizeClientMetadata(latest, &next, time.Now().UTC().UnixMilli())
 	next.Revision = expectedRevision + 1
-	if err := next.Validate(m.adminAddr, m.serverAddr); err != nil {
+	if err := next.ValidateStrict(m.adminAddr, m.serverAddr); err != nil {
 		return ClientFile{}, err
 	}
 	if err := ValidateTargets(next, m.targetPolicy); err != nil {
@@ -107,6 +117,76 @@ func (m *Manager) Replace(expectedRevision uint64, next ClientFile, prepare Prep
 	snapshot := cloneClientFile(next)
 	m.current.Store(&snapshot)
 	return cloneClientFile(snapshot), nil
+}
+
+func (m *Manager) EnsureMetadata() (MetadataMigration, error) {
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+
+	lock, err := os.OpenFile(m.path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return MetadataMigration{}, fmt.Errorf("open config lock: %w", err)
+	}
+	defer func() { _ = lock.Close() }()
+	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return MetadataMigration{}, fmt.Errorf("lock client configuration: %w", err)
+	}
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
+
+	info, err := os.Stat(m.path)
+	if err != nil {
+		return MetadataMigration{}, fmt.Errorf("stat client configuration: %w", err)
+	}
+	latest, err := LoadClientFile(m.path)
+	if err != nil {
+		return MetadataMigration{}, err
+	}
+	timestamp := info.ModTime().UTC().UnixMilli()
+	if timestamp <= 0 {
+		timestamp = time.Now().UTC().UnixMilli()
+	}
+	var migrated []string
+	for index := range latest.ClientConfig {
+		client := &latest.ClientConfig[index]
+		changed := false
+		remark := strings.TrimSpace(client.Remark)
+		if remark == "" {
+			remark = client.ClientID
+			changed = true
+		} else if remark != client.Remark {
+			changed = true
+		}
+		client.Remark = remark
+		if client.CreatedAt == 0 {
+			client.CreatedAt = timestamp
+			changed = true
+		}
+		if client.UpdatedAt == 0 {
+			client.UpdatedAt = client.CreatedAt
+			changed = true
+		}
+		if changed {
+			migrated = append(migrated, client.ClientID)
+		}
+	}
+	if err := latest.ValidateStrict(m.adminAddr, m.serverAddr); err != nil {
+		return MetadataMigration{}, err
+	}
+	if len(migrated) == 0 {
+		snapshot := cloneClientFile(latest)
+		m.current.Store(&snapshot)
+		return MetadataMigration{Revision: latest.Revision}, nil
+	}
+	latest.Revision++
+	if err := writeAtomic(m.path, latest); err != nil {
+		return MetadataMigration{}, err
+	}
+	snapshot := cloneClientFile(latest)
+	m.current.Store(&snapshot)
+	return MetadataMigration{
+		ClientIDs: migrated, TimeSource: "client_config_mtime",
+		Revision: latest.Revision,
+	}, nil
 }
 
 func (m *Manager) Reload() (ClientFile, error) {
@@ -147,6 +227,52 @@ func preserveRedactionMarkers(next *ClientFile, current ClientFile) {
 			next.ClientConfig[i].ClientToken = tokens[next.ClientConfig[i].ClientID]
 		}
 	}
+}
+
+func normalizeClientMetadata(current ClientFile, next *ClientFile, now int64) {
+	previous := make(map[string]ClientConfig, len(current.ClientConfig))
+	for _, client := range current.ClientConfig {
+		previous[client.ClientID] = client
+	}
+	for index := range next.ClientConfig {
+		client := &next.ClientConfig[index]
+		client.Remark = strings.TrimSpace(client.Remark)
+		existing, ok := previous[client.ClientID]
+		if !ok {
+			client.CreatedAt = now
+			client.UpdatedAt = now
+			continue
+		}
+		if existing.CreatedAt <= 0 {
+			existing.CreatedAt = now
+		}
+		if existing.UpdatedAt <= 0 {
+			existing.UpdatedAt = existing.CreatedAt
+		}
+		if existing.Remark == "" && client.Remark == "" {
+			existing.Remark = existing.ClientID
+			client.Remark = existing.ClientID
+		}
+		client.CreatedAt = existing.CreatedAt
+		client.UpdatedAt = existing.UpdatedAt
+		if !clientSemanticallyEqual(existing, *client) {
+			client.UpdatedAt = now
+			if client.UpdatedAt <= existing.UpdatedAt {
+				client.UpdatedAt = existing.UpdatedAt + 1
+			}
+			if client.UpdatedAt < client.CreatedAt {
+				client.UpdatedAt = client.CreatedAt
+			}
+		}
+	}
+}
+
+func clientSemanticallyEqual(left, right ClientConfig) bool {
+	return left.ClientID == right.ClientID &&
+		left.ClientToken == right.ClientToken &&
+		left.Remark == right.Remark &&
+		left.Enabled == right.Enabled &&
+		reflect.DeepEqual(left.ProxyList, right.ProxyList)
 }
 
 func writeAtomic(path string, value ClientFile) error {

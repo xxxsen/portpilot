@@ -4,7 +4,10 @@
     {
       "client_id": "dev-client",
       "client_token": "cG9ydHBpbG90LWRldi10b2tlbi0wMTIzNDU2Nzg5YWJjZGVm",
+      "remark": "本地开发客户端",
       "enabled": true,
+      "created_at": 1784449800000,
+      "updated_at": 1784449800000,
       "proxy_list": [
         {
           "proxy_id": "dev-tcp-echo",
@@ -46,4 +49,3 @@
     }
   ]
 }
-

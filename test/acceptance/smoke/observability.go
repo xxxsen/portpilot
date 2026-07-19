@@ -18,12 +18,14 @@ type smokeSummary struct {
 	UDPFlows       int   `json:"udp_flows"`
 }
 
-type smokeEvent struct {
-	CreatedAt string `json:"created_at"`
-	Kind      string `json:"kind"`
-	ProxyID   string `json:"proxy_id"`
-	UpBytes   int64  `json:"up_bytes"`
-	DownBytes int64  `json:"down_bytes"`
+type smokeConnection struct {
+	AcceptedAt  int64  `json:"accepted_at"`
+	Protocol    string `json:"protocol"`
+	ProxyID     string `json:"proxy_id"`
+	UpBytes     int64  `json:"up_bytes"`
+	DownBytes   int64  `json:"down_bytes"`
+	UpPackets   int64  `json:"up_packets"`
+	DownPackets int64  `json:"down_packets"`
 }
 
 func smokeObservability(ctx context.Context, adminURL string, since time.Time) error {
@@ -37,32 +39,38 @@ func smokeObservability(ctx context.Context, adminURL string, since time.Time) e
 			return err
 		}
 		var payload struct {
-			Events []smokeEvent `json:"events"`
+			Items []smokeConnection `json:"items"`
 		}
-		if err := smokeGetJSON(ctx, client, adminURL+"/api/events?limit=100", &payload); err != nil {
+		if err := smokeGetJSON(ctx, client, adminURL+"/api/network/connections?page=1&page_size=100", &payload); err != nil {
 			return err
 		}
-		tcpEvents := map[string]bool{}
-		for _, event := range payload.Events {
-			created, parseErr := time.Parse(time.RFC3339Nano, event.CreatedAt)
-			if parseErr != nil || created.Before(since) {
+		tcpConnections := map[string]bool{}
+		udpFlows := 0
+		for _, connection := range payload.Items {
+			if connection.AcceptedAt < since.UnixMilli() {
 				continue
 			}
-			if event.Kind == "tcp_tunnel" && event.UpBytes > 0 && event.DownBytes > 0 {
-				tcpEvents[event.ProxyID] = true
+			if connection.Protocol == "tcp" && connection.UpBytes > 0 && connection.DownBytes > 0 {
+				tcpConnections[connection.ProxyID] = true
+			}
+			if connection.Protocol == "udp" &&
+				connection.UpBytes > 0 && connection.DownBytes > 0 &&
+				connection.UpPackets > 0 && connection.DownPackets > 0 {
+				udpFlows++
 			}
 		}
 		if summary.PendingTunnels == 0 && summary.ActiveTunnels == 0 &&
 			summary.UDPChannels >= 2 && summary.UDPFlows >= 2 &&
-			tcpEvents["dev-tcp-echo"] && tcpEvents["dev-tcp-direct"] {
+			tcpConnections["dev-tcp-echo"] && tcpConnections["dev-tcp-direct"] &&
+			udpFlows >= 2 {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf(
-				"observability did not converge: pending=%d active=%d udp_channels=%d udp_flows=%d tcp_events=%v",
+				"observability did not converge: pending=%d active=%d udp_channels=%d udp_flows=%d tcp_connections=%v observed_udp_flows=%d",
 				summary.PendingTunnels, summary.ActiveTunnels,
-				summary.UDPChannels, summary.UDPFlows, tcpEvents,
+				summary.UDPChannels, summary.UDPFlows, tcpConnections, udpFlows,
 			)
 		case <-time.After(100 * time.Millisecond):
 		}

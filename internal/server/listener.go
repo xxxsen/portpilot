@@ -12,9 +12,10 @@ import (
 )
 
 type ProxyRuntime struct {
-	ClientID string
-	Proxy    config.ProxyEnvelope
-	Data     config.TunnelData
+	ClientID     string
+	ClientRemark string
+	Proxy        config.ProxyEnvelope
+	Data         config.TunnelData
 }
 
 type ListenerHandle struct {
@@ -144,7 +145,7 @@ func (m *ListenerManager) serveTCP(handle *ListenerHandle) {
 			continue
 		}
 		copy := *runtime
-		go m.app.Tunnels.HandleExternal(copy, conn)
+		go m.app.Tunnels.HandleExternal(context.Background(), copy, conn)
 	}
 }
 
@@ -234,7 +235,8 @@ func runtimeMap(file config.ClientFile, defaultTransport string) (map[string]Pro
 				data.Transport = defaultTransport
 			}
 			result[proxy.ProxyID] = ProxyRuntime{
-				ClientID: client.ClientID, Proxy: proxy, Data: data,
+				ClientID: client.ClientID, ClientRemark: client.Remark,
+				Proxy: proxy, Data: data,
 			}
 		}
 	}

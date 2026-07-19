@@ -10,7 +10,7 @@ async function login(page: Page) {
   await expect(page.getByRole("heading", {name: "总览"})).toBeVisible();
 }
 
-async function navigate(page: Page, label: "客户端" | "代理规则" | "活动记录") {
+async function navigate(page: Page, label: "客户端" | "代理规则" | "网络活动" | "事件与审计") {
   const menu = page.getByRole("button", {name: "打开导航"});
   if (await menu.isVisible()) await menu.click();
   await page.getByRole("button", {name: label}).click();
@@ -89,6 +89,13 @@ async function createProxy(
   await expect(page.getByRole("row").filter({hasText: id})).toBeVisible();
 }
 
+test.beforeEach(({page}) => {
+  page.on("dialog", (dialog) => {
+    void dialog.dismiss();
+    throw new Error(`unexpected native browser dialog: ${dialog.type()}`);
+  });
+});
+
 test("authentication lifecycle and secret redaction", async ({page, context}) => {
   const consoleErrors: string[] = [];
   page.on("console", (message) => {
@@ -101,8 +108,21 @@ test("authentication lifecycle and secret redaction", async ({page, context}) =>
   await expect(page.getByText("用户名或密码不正确")).toBeVisible();
 
   await page.getByLabel("密码").fill("admin");
+  await page.locator("label").filter({hasText: "10 分钟"}).click();
   await page.getByRole("button", {name: "登录"}).click();
   await expect(page.getByRole("heading", {name: "总览"})).toBeVisible();
+  const meResponse = await page.request.get("/backend/api/auth/me");
+  expect(meResponse.ok()).toBeTruthy();
+  const me = await meResponse.json() as {
+    authenticated_at: number;
+    expires_at: number;
+    session_ttl: string;
+  };
+  expect(me.session_ttl).toBe("10m");
+  expect(me.expires_at - me.authenticated_at).toBe(10 * 60 * 1000);
+  const adminCookie = (await context.cookies()).find((cookie) => cookie.name === "portpilot_admin");
+  expect(adminCookie).toBeDefined();
+  expect(Math.abs((adminCookie?.expires ?? 0) * 1000 - me.expires_at)).toBeLessThan(1100);
   const config = await currentConfig(page);
   expect(JSON.stringify(config)).not.toContain("cG9ydHBpbG90LWRldi");
   expect(config.client_config[0]?.client_token).toBe("__REDACTED__");
@@ -124,12 +144,24 @@ test("live status and audit views expose the formal server state", async ({page}
 
   await navigate(page, "客户端");
   const client = page.locator(".client-row").filter({hasText: "dev-client"});
-  await expect(client).toContainText("epoch");
   await expect(client).toContainText("3 条代理");
 
-  await navigate(page, "活动记录");
-  await expect(page.getByRole("heading", {name: "事件与审计"})).toBeVisible();
-  await expect(page.locator(".event-row").first()).toBeVisible();
+  await navigate(page, "网络活动");
+  await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
+  const networkResponse = await page.request.get("/backend/api/network/connections?page=1&page_size=25");
+  expect(networkResponse.ok()).toBeTruthy();
+  const network = await networkResponse.json() as {
+    items: Array<{proxy_id: string}>;
+  };
+  expect(network.items.length).toBeGreaterThan(0);
+  await page.getByRole("row").filter({hasText: network.items[0].proxy_id}).last().click();
+  await expect(page.getByRole("dialog", {name: "连接详情"})).toBeVisible();
+  await expect(page.getByText("外部来源", {exact: true})).toBeVisible();
+  await page.getByRole("button", {name: "关闭"}).click();
+
+  await navigate(page, "事件与审计");
+  await expect(page.getByRole("heading", {name: "事件与审计", level: 1})).toBeVisible();
+  await expect(page.locator(".audit-table tbody tr").first()).toBeVisible();
 });
 
 test("proxy CRUD validates drafts, rejects stale revisions, and records audit", async ({page}, testInfo) => {
@@ -142,7 +174,20 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
 
   try {
     await navigate(page, "代理规则");
-    await createProxy(page, proxyIds[0], "tcp", "smux", "127.0.0.1:7100", "127.0.0.1:18080");
+    await expect(page.locator("#proxy-client")).toHaveValue("");
+    await page.getByRole("button", {name: "新增代理"}).click();
+    const editor = page.getByRole("dialog", {name: "新增代理"});
+    await expect(editor).toBeVisible();
+    await expect(editor.getByRole("button", {name: "保存配置"})).toBeDisabled();
+    await editor.getByLabel("客户端").selectOption("dev-client");
+    await editor.getByLabel("代理 ID").fill(proxyIds[0]);
+    await editor.getByLabel("备注").fill(`E2E ${proxyIds[0]}`);
+    await editor.getByLabel("网络").selectOption("tcp");
+    await editor.getByLabel("承载").selectOption("smux");
+    await editor.getByLabel("服务端监听").fill("127.0.0.1:7100");
+    await editor.getByLabel("内网目标").fill("127.0.0.1:18080");
+    await editor.getByRole("button", {name: "保存配置"}).click();
+    await expect(editor).toBeHidden();
     await createProxy(page, proxyIds[1], "tcp", "direct", "127.0.0.1:7101", "127.0.0.1:18080");
     await createProxy(page, proxyIds[2], "udp", "smux-datagram", "127.0.0.1:7102", "127.0.0.1:18081");
 
@@ -175,8 +220,8 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await staleRow.locator(".switch").click();
     await expect(page.getByText("配置已被其他会话更新，已重新载入最新版本")).toBeVisible();
 
-    await navigate(page, "活动记录");
-    await expect(page.locator(".event-row").filter({hasText: "config_update"}).first()).toBeVisible();
+    await navigate(page, "事件与审计");
+    await expect(page.getByRole("row").filter({hasText: "config_update"}).first()).toBeVisible();
   } finally {
     await removeE2EProxies(page, csrf);
   }

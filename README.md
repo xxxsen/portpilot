@@ -11,7 +11,9 @@ PortPilot 是一个由服务端集中管理代理规则的内网反向代理工�
 - UDP 在公网端和内网端保持 UDP，服务端与客户端之间使用 UDP-over-smux/TCP。
 - 代理配置文件是事实来源；SQLite 只保存可丢弃的事件、流量和审计信息。
 
-完整协议、安全、生命周期和验收设计见 [docs/001-portpilot-design.md](docs/001-portpilot-design.md)。
+完整协议、安全和生命周期见 [docs/001-portpilot-design.md](docs/001-portpilot-design.md)；
+管理后台、审计、网络活动、SQLite migration 和 CLI 见
+[docs/002-admin-console-and-cli-improvements.md](docs/002-admin-console-and-cli-improvements.md)。
 
 ## 本地开发
 
@@ -44,6 +46,14 @@ make dev
 - Nginx 边界：参考 `docker/nginx/default.conf`
 
 所有 JSON 使用严格解析，未知字段会导致启动失败。管理员密码必须是 bcrypt 哈希且 cost 不低于 10；客户端 token 应由至少 32 字节随机数据生成。生产配置应限制为服务账号可读，并配置目标 CIDR/端口策略。
+
+生成管理员密码哈希：
+
+```bash
+./bin/portpilot-server password-hash
+```
+
+服务端和客户端使用 Cobra 子命令，运行时必须显式调用 `run --config <path>`。
 
 ## 门禁
 

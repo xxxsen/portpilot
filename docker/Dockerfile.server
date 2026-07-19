@@ -5,6 +5,7 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY migrations ./migrations
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_TIME=unknown
@@ -18,5 +19,4 @@ WORKDIR /var/lib/portpilot
 COPY --from=builder /out/portpilot-server /usr/local/bin/portpilot-server
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/portpilot-server"]
-CMD ["-config", "/etc/portpilot/server.json"]
-
+CMD ["run", "--config", "/etc/portpilot/server.json"]

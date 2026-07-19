@@ -246,6 +246,7 @@ func (s *Session) Drain() {
 	s.cancel()
 	s.app.Tickets.InvalidateSession(s.ClientID, s.ID, s.Epoch)
 	s.app.Tunnels.CancelSession(s)
+	s.app.UDP.CloseSession(s, "session_draining")
 	s.muxMu.Lock()
 	muxes := make([]*MuxSession, 0, len(s.muxes))
 	for _, mux := range s.muxes {

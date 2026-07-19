@@ -3,13 +3,13 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,11 +23,12 @@ import (
 const adminCookie = "portpilot_admin"
 
 type adminSession struct {
-	ID        string
-	UserName  string
-	CSRF      string
-	CreatedAt time.Time
-	LastSeen  time.Time
+	ID              string
+	UserName        string
+	CSRF            string
+	AuthenticatedAt time.Time
+	ExpiresAt       time.Time
+	SessionTTL      string
 }
 
 type loginWindow struct {
@@ -39,19 +40,16 @@ type AdminAuth struct {
 	users        map[string]string
 	sessions     map[string]*adminSession
 	loginWindows map[string]loginWindow
-	idleTimeout  time.Duration
-	absoluteTTL  time.Duration
 	loginLimit   int
 	mu           sync.Mutex
 }
 
-func NewAdminAuth(users []config.User, idleTimeout, absoluteTTL time.Duration, loginLimit int) *AdminAuth {
+func NewAdminAuth(users []config.User, loginLimit int) *AdminAuth {
 	auth := &AdminAuth{
 		users:        make(map[string]string, len(users)),
 		sessions:     make(map[string]*adminSession),
 		loginWindows: make(map[string]loginWindow),
-		idleTimeout:  idleTimeout, absoluteTTL: absoluteTTL,
-		loginLimit: loginLimit,
+		loginLimit:   loginLimit,
 	}
 	for _, user := range users {
 		auth.users[user.UserName] = user.PasswordHash
@@ -64,25 +62,33 @@ func (a *App) adminMux() http.Handler {
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
 	})
-	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if !a.Ready() {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+			writeJSON(w, http.StatusServiceUnavailable, a.healthStatus(r.Context(), "not_ready"))
 			return
 		}
 		status := "ready"
 		if a.Degraded() {
 			status = "degraded"
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": status})
+		writeJSON(w, http.StatusOK, a.healthStatus(r.Context(), status))
 	})
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
 	mux.HandleFunc("POST /api/auth/logout", a.requireAdmin(a.requireCSRF(a.handleLogout)))
 	mux.HandleFunc("GET /api/auth/me", a.requireAdmin(a.handleMe))
 	mux.HandleFunc("GET /api/clients", a.requireAdmin(a.handleClients))
+	mux.HandleFunc("POST /api/clients", a.requireAdmin(a.requireCSRF(a.handleCreateClient)))
+	mux.HandleFunc("PATCH /api/clients/{client_id}", a.requireAdmin(a.requireCSRF(a.handleUpdateClient)))
+	mux.HandleFunc("POST /api/clients/{client_id}/rotate-token", a.requireAdmin(a.requireCSRF(a.handleRotateClientToken)))
 	mux.HandleFunc("POST /api/clients/{client_id}/disconnect", a.requireAdmin(a.requireCSRF(a.handleDisconnect)))
 	mux.HandleFunc("GET /api/config", a.requireAdmin(a.handleGetConfig))
 	mux.HandleFunc("PUT /api/config", a.requireAdmin(a.requireCSRF(a.handlePutConfig)))
 	mux.HandleFunc("GET /api/events", a.requireAdmin(a.handleEvents))
+	mux.HandleFunc("GET /api/events/{event_id}", a.requireAdmin(a.handleEventDetail))
+	mux.HandleFunc("GET /api/network/summary", a.requireAdmin(a.handleNetworkSummary))
+	mux.HandleFunc("GET /api/network/connections", a.requireAdmin(a.handleNetworkConnections))
+	mux.HandleFunc("GET /api/network/connections/{activity_id}", a.requireAdmin(a.handleNetworkConnectionDetail))
+	mux.HandleFunc("GET /api/network/clients", a.requireAdmin(a.handleNetworkClients))
 	mux.HandleFunc("GET /api/metrics/summary", a.requireAdmin(a.handleSummary))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -94,23 +100,68 @@ func (a *App) adminMux() http.Handler {
 	return securityHeaders(mux)
 }
 
+func (a *App) healthStatus(ctx context.Context, status string) map[string]any {
+	migrationVersion := 0
+	database := "ok"
+	if a.Events == nil {
+		database = "unavailable"
+	} else {
+		version, err := a.Events.SchemaVersion(ctx)
+		if err != nil {
+			database = "degraded"
+		} else {
+			migrationVersion = version
+		}
+		if a.Events.Degraded() {
+			database = "degraded"
+		}
+	}
+	auditWriter := "ok"
+	if a.storeError.Load() {
+		auditWriter = "degraded"
+	}
+	activityWriter := "ok"
+	if a.Activity != nil && a.Activity.Degraded() {
+		activityWriter = "degraded"
+	}
+	return map[string]any{
+		"status": status, "database": database,
+		"audit_writer": auditWriter, "activity_writer": activityWriter,
+		"migration_version": migrationVersion,
+	}
+}
+
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		UserName string `json:"user_name"`
-		Password string `json:"password"`
+		UserName   string `json:"user_name"`
+		Password   string `json:"password"`
+		SessionTTL string `json:"session_ttl"`
 	}
 	if err := decodeJSONRequest(r, &request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
+	ttlName, ttl, ok := adminSessionTTL(request.SessionTTL)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_session_ttl"})
+		return
+	}
+	request.UserName = strings.TrimSpace(request.UserName)
 	source := a.requestSource(r)
 	if !a.Admin.allowLogin("source:"+source) || !a.Admin.allowLogin("account:"+request.UserName) {
+		if err := a.writeLoginAudit(r.Context(), request.UserName, source, ttlName, "denied", "rate_limited", r.UserAgent()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_store_unavailable"})
+			return
+		}
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
 		return
 	}
 	hash := a.Admin.users[request.UserName]
 	if hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(request.Password)) != nil {
-		a.Events.Record(store.Event{Kind: "admin_login", Reason: "failed", Metadata: map[string]any{"user_name": request.UserName, "source": source}})
+		if err := a.writeLoginAudit(r.Context(), request.UserName, source, ttlName, "failure", "invalid_credentials", r.UserAgent()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_store_unavailable"})
+			return
+		}
 		time.Sleep(150 * time.Millisecond)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_credentials"})
 		return
@@ -126,9 +177,14 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	expiresAt := now.Add(ttl)
+	if err := a.writeLoginAudit(r.Context(), request.UserName, source, ttlName, "success", "", r.UserAgent()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_store_unavailable"})
+		return
+	}
 	session := &adminSession{
 		ID: sessionID, UserName: request.UserName, CSRF: csrf,
-		CreatedAt: now, LastSeen: now,
+		AuthenticatedAt: now, ExpiresAt: expiresAt, SessionTTL: ttlName,
 	}
 	a.Admin.mu.Lock()
 	a.Admin.sessions[sessionID] = session
@@ -137,10 +193,13 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 		Name: adminCookie, Value: sessionID, Path: "/",
 		HttpOnly: true, Secure: a.secureRequest(r), SameSite: http.SameSiteStrictMode,
-		MaxAge: int(a.Admin.absoluteTTL.Seconds()),
+		MaxAge: int(ttl.Seconds()), Expires: expiresAt,
 	})
-	a.Events.Record(store.Event{Kind: "admin_login", Reason: "success", Metadata: map[string]any{"user_name": request.UserName, "source": source}})
-	writeJSON(w, http.StatusOK, map[string]string{"user_name": request.UserName, "csrf_token": csrf})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_name": request.UserName, "csrf_token": csrf,
+		"authenticated_at": now.UTC().UnixMilli(), "expires_at": expiresAt.UTC().UnixMilli(),
+		"session_ttl": ttlName,
+	})
 }
 
 func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -153,13 +212,21 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Name: adminCookie, Value: "", Path: "/", HttpOnly: true,
 		Secure: a.secureRequest(r), SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})
-	a.Events.Record(store.Event{Kind: "admin_logout", Reason: "success", Metadata: map[string]any{"user_name": session.UserName}})
+	a.writeAuditBestEffort(r.Context(), store.AuditEvent{
+		Category: "auth", EventType: "admin_logout", Outcome: "success",
+		ActorType: "admin", ActorID: session.UserName, SourceAddr: a.requestSource(r),
+		Summary: "管理员主动退出", ReasonCode: "user_requested",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	session := adminFromContext(r)
-	writeJSON(w, http.StatusOK, map[string]string{"user_name": session.UserName, "csrf_token": session.CSRF})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_name": session.UserName, "csrf_token": session.CSRF,
+		"authenticated_at": session.AuthenticatedAt.UTC().UnixMilli(),
+		"expires_at":       session.ExpiresAt.UTC().UnixMilli(), "session_ttl": session.SessionTTL,
+	})
 }
 
 func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
@@ -169,12 +236,17 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 	}
 	type clientView struct {
 		ClientID      string                 `json:"client_id"`
+		Remark        string                 `json:"remark"`
 		Enabled       bool                   `json:"enabled"`
+		Online        bool                   `json:"online"`
 		State         string                 `json:"state"`
-		SessionID     string                 `json:"session_id,omitempty"`
 		Epoch         uint64                 `json:"epoch"`
+		SessionEpoch  uint64                 `json:"session_epoch"`
 		MuxSessions   int                    `json:"mux_sessions"`
 		ActiveStreams int64                  `json:"active_streams"`
+		ProxyCount    int                    `json:"proxy_count"`
+		CreatedAt     int64                  `json:"created_at"`
+		UpdatedAt     int64                  `json:"updated_at"`
 		Proxies       []config.ProxyEnvelope `json:"proxies"`
 	}
 	file := a.ConfigManager.Snapshot()
@@ -191,13 +263,17 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 			state = status.State
 		}
 		result = append(result, clientView{
-			ClientID: client.ClientID, Enabled: client.Enabled, State: state,
-			SessionID: status.SessionID, Epoch: status.Epoch,
+			ClientID: client.ClientID, Remark: client.Remark,
+			Enabled: client.Enabled, Online: online, State: state,
+			Epoch: status.Epoch, SessionEpoch: status.Epoch,
 			MuxSessions: status.MuxSessions, ActiveStreams: status.ActiveStreams,
+			ProxyCount: len(client.ProxyList), CreatedAt: client.CreatedAt, UpdatedAt: client.UpdatedAt,
 			Proxies: client.ProxyList,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"clients": result, "revision": file.Revision})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": result, "clients": result, "revision": file.Revision,
+	})
 }
 
 func (a *App) handleDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +283,11 @@ func (a *App) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := adminFromContext(r)
-	a.Events.Record(store.Event{Kind: "admin_client_disconnect", ClientID: clientID, Reason: "requested", Metadata: map[string]any{"user_name": session.UserName}})
+	a.writeAuditBestEffort(r.Context(), store.AuditEvent{
+		Category: "client", EventType: "admin_client_disconnect", Outcome: "success",
+		ActorType: "admin", ActorID: session.UserName, SourceAddr: a.requestSource(r),
+		ClientID: clientID, Summary: "管理员断开客户端连接", ReasonCode: "user_requested",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -224,23 +304,21 @@ func (a *App) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	rotatedClients := rotatedClientTokens(a.ConfigManager.Snapshot(), request.Config)
-	updated, err := a.ConfigManager.Replace(request.ExpectedRevision, request.Config, a.Listeners.Prepare)
-	if err != nil {
-		if errors.Is(err, config.ErrRevisionConflict) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "revision_conflict"})
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_config", "detail": err.Error()})
+	current := a.ConfigManager.Snapshot()
+	rotatedClients := rotatedClientTokens(current, request.Config)
+	if len(rotatedClients) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "token_rotation_requires_dedicated_endpoint",
+		})
 		return
 	}
-	session := adminFromContext(r)
-	for _, clientID := range rotatedClients {
-		a.Sessions.Kick(clientID)
-		a.Events.Record(store.Event{Kind: "client_token_rotated", ClientID: clientID, Reason: "success", Metadata: map[string]any{"user_name": session.UserName}})
+	updated, ok := a.commitConfigMutation(w, r, request.ExpectedRevision, request.Config, configMutation{
+		eventType: "config_update", summary: "更新代理配置",
+		changes: diffConfig(current, request.Config),
+	})
+	if !ok {
+		return
 	}
-	a.UDP.Reconcile()
-	a.Events.Record(store.Event{Kind: "config_update", Reason: "success", Metadata: map[string]any{"user_name": session.UserName, "revision": updated.Revision}})
 	writeJSON(w, http.StatusOK, config.Redacted(updated))
 }
 
@@ -249,13 +327,30 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event_store_unavailable"})
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	events, err := a.Events.List(r.Context(), limit)
+	query, err := auditQueryFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query", "detail": err.Error()})
+		return
+	}
+	events, err := a.Events.ListAudit(r.Context(), query)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event_store_unavailable"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (a *App) handleEventDetail(w http.ResponseWriter, r *http.Request) {
+	event, err := a.Events.AuditDetail(r.Context(), r.PathValue("event_id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "event_not_found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "event_store_unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, event)
 }
 
 func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
@@ -281,8 +376,15 @@ func (a *App) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication_required"})
 			return
 		}
-		session := a.Admin.getSession(cookie.Value)
+		session, expired := a.Admin.lookupSession(cookie.Value)
 		if session == nil {
+			if expired != nil {
+				a.writeAuditBestEffort(r.Context(), store.AuditEvent{
+					Category: "auth", EventType: "admin_logout", Outcome: "success",
+					ActorType: "admin", ActorID: expired.UserName, SourceAddr: a.requestSource(r),
+					Summary: "管理员会话到期", ReasonCode: "session_expired",
+				})
+			}
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session_expired"})
 			return
 		}
@@ -304,20 +406,25 @@ func (a *App) requireCSRF(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (a *AdminAuth) getSession(id string) *adminSession {
+	session, _ := a.lookupSession(id)
+	return session
+}
+
+func (a *AdminAuth) lookupSession(id string) (*adminSession, *adminSession) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	session := a.sessions[id]
 	if session == nil {
-		return nil
+		return nil, nil
 	}
 	now := time.Now()
-	if now.Sub(session.LastSeen) > a.idleTimeout || now.Sub(session.CreatedAt) > a.absoluteTTL {
+	if !now.Before(session.ExpiresAt) {
 		delete(a.sessions, id)
-		return nil
+		copy := *session
+		return nil, &copy
 	}
-	session.LastSeen = now
 	copy := *session
-	return &copy
+	return &copy, nil
 }
 
 func (a *AdminAuth) allowLogin(source string) bool {
@@ -363,6 +470,10 @@ func (a *App) trustedProxy(remote string) bool {
 		return false
 	}
 	ip := net.ParseIP(host)
+	return a.trustedProxyIP(ip)
+}
+
+func (a *App) trustedProxyIP(ip net.IP) bool {
 	if ip == nil {
 		return false
 	}
@@ -413,15 +524,45 @@ func (a *App) requestSource(r *http.Request) string {
 	if !a.trustedProxy(r.RemoteAddr) {
 		return host
 	}
-	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0])
-	if net.ParseIP(forwarded) != nil {
-		return forwarded
+	forwardedHeader := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if forwardedHeader != "" {
+		values := strings.Split(forwardedHeader, ",")
+		ips := make([]net.IP, 0, len(values))
+		for _, value := range values {
+			ip := net.ParseIP(strings.TrimSpace(value))
+			if ip == nil {
+				a.recordInvalidForwardedHeader(r.Context(), host)
+				return host
+			}
+			ips = append(ips, ip)
+		}
+		for index := len(ips) - 1; index >= 0; index-- {
+			if !a.trustedProxyIP(ips[index]) || index == 0 {
+				return ips[index].String()
+			}
+		}
 	}
 	realIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
-	if net.ParseIP(realIP) != nil {
-		return realIP
+	if realIP != "" {
+		ip := net.ParseIP(realIP)
+		if ip == nil {
+			a.recordInvalidForwardedHeader(r.Context(), host)
+			return host
+		}
+		return ip.String()
 	}
 	return host
+}
+
+func (a *App) recordInvalidForwardedHeader(ctx context.Context, peer string) {
+	if a.Events == nil {
+		return
+	}
+	a.writeAuditBestEffort(ctx, store.AuditEvent{
+		Category: "security", EventType: "security", Outcome: "denied",
+		ActorType: "external", SourceAddr: peer,
+		Summary: "忽略非法代理来源头", ReasonCode: "invalid_forwarded_header",
+	})
 }
 
 type adminContextKey struct{}

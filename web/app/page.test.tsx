@@ -15,6 +15,9 @@ describe("Home", () => {
     expect(await screen.findByRole("heading", {name: "管理控制台"})).toBeInTheDocument();
     expect(screen.getByLabelText("用户名")).toBeInTheDocument();
     expect(screen.getByLabelText("密码")).toBeInTheDocument();
+    expect(screen.getByLabelText("10 分钟")).toBeInTheDocument();
+    expect(screen.getByLabelText("30 分钟")).toBeChecked();
+    expect(screen.getByLabelText("1 小时")).toBeInTheDocument();
+    expect(screen.getByLabelText("24 小时")).toBeInTheDocument();
   });
 });
-

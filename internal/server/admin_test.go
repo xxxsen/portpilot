@@ -11,18 +11,18 @@ import (
 
 func TestAdminSessionExpiryAndCSRF(t *testing.T) {
 	t.Parallel()
-	admin := NewAdminAuth(nil, 20*time.Millisecond, time.Hour, 10)
+	admin := NewAdminAuth(nil, 10)
 	now := time.Now()
 	admin.sessions["session"] = &adminSession{
 		ID: "session", UserName: "admin", CSRF: "csrf",
-		CreatedAt: now, LastSeen: now,
+		AuthenticatedAt: now, ExpiresAt: now.Add(20 * time.Millisecond), SessionTTL: "10m",
 	}
 	if admin.getSession("session") == nil {
 		t.Fatal("fresh session was rejected")
 	}
 	time.Sleep(30 * time.Millisecond)
 	if admin.getSession("session") != nil {
-		t.Fatal("idle session did not expire")
+		t.Fatal("absolute session did not expire")
 	}
 
 	app := &App{Admin: admin}
@@ -68,7 +68,7 @@ func TestRequestSourceOnlyTrustsConfiguredProxy(t *testing.T) {
 
 func TestAdminLoginLimiterSeparatesSourceAndAccount(t *testing.T) {
 	t.Parallel()
-	admin := NewAdminAuth(nil, time.Minute, time.Hour, 10)
+	admin := NewAdminAuth(nil, 10)
 	for attempt := 0; attempt < 10; attempt++ {
 		if !admin.allowLogin("source:192.0.2.1") || !admin.allowLogin("account:admin") {
 			t.Fatalf("login attempt %d was limited early", attempt)
@@ -82,5 +82,22 @@ func TestAdminLoginLimiterSeparatesSourceAndAccount(t *testing.T) {
 	}
 	if !admin.allowLogin("source:192.0.2.2") || !admin.allowLogin("account:other") {
 		t.Fatal("unrelated source and account shared a login window")
+	}
+}
+
+func TestAdminSessionTTLEnumeration(t *testing.T) {
+	t.Parallel()
+	tests := map[string]time.Duration{
+		"": 30 * time.Minute, "10m": 10 * time.Minute,
+		"30m": 30 * time.Minute, "1h": time.Hour, "24h": 24 * time.Hour,
+	}
+	for value, expected := range tests {
+		name, duration, ok := adminSessionTTL(value)
+		if !ok || duration != expected {
+			t.Fatalf("adminSessionTTL(%q) = %q/%s/%v", value, name, duration, ok)
+		}
+	}
+	if _, _, ok := adminSessionTTL("8h"); ok {
+		t.Fatal("unsupported session TTL was accepted")
 	}
 }
