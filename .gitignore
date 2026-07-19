@@ -1,6 +1,7 @@
 .cache/
 .dev-data/
 .tools/
+/td/
 bin/
 web/node_modules/
 web/.next/
