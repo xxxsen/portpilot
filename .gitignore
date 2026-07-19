@@ -1,0 +1,12 @@
+.cache/
+.dev-data/
+.tools/
+bin/
+web/node_modules/
+web/.next/
+web/playwright-report/
+web/test-results/
+*.db
+*.db-shm
+*.db-wal
+web/*.tsbuildinfo

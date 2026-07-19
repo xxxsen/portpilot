@@ -1,0 +1,8 @@
+{
+  "server": "127.0.0.1:6100",
+  "enable_tls": false,
+  "tls_ca_file": "",
+  "path": "/portpilot",
+  "client_id": "dev-client",
+  "client_token": "cG9ydHBpbG90LWRldi10b2tlbi0wMTIzNDU2Nzg5YWJjZGVm"
+}

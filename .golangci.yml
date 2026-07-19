@@ -1,0 +1,87 @@
+version: "2"
+run:
+  timeout: 5m
+  tests: true
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - dupl
+    - errcheck
+    - errorlint
+    - forbidigo
+    - gocognit
+    - gocritic
+    - gocyclo
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unparam
+    - unused
+    - wrapcheck
+  settings:
+    dupl:
+      threshold: 150
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print.*$
+          msg: use structured logging outside command-line test drivers
+    gocognit:
+      min-complexity: 40
+    gocyclo:
+      min-complexity: 25
+    nestif:
+      min-complexity: 6
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    wrapcheck:
+      # Transparent IO adapters must preserve sentinel errors such as io.EOF and net.ErrClosed.
+      ignore-interface-regexps:
+        - ".*"
+      extra-ignore-sigs:
+        - .Read(
+        - .Write(
+        - .Close(
+        - io.ReadFull(
+        - .ReadJSON(
+        - .WriteJSON(
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: package-comments
+          disabled: true
+  exclusions:
+    paths:
+      - ^web/node_modules/
+    rules:
+      - path: ^(cmd|test)/
+        linters:
+          - forbidigo
+          - wrapcheck
+      - path: _test\.go
+        linters:
+          - dupl
+          - gocognit
+          - gocyclo
+          - nestif
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

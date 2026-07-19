@@ -1,0 +1,81 @@
+name: docker-image
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: docker/setup-buildx-action@v4
+      - run: make bootstrap
+      - run: npx --prefix web playwright install --with-deps chromium
+      - run: make acceptance
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: docker-image-acceptance-failure
+          path: |
+            .dev-data/logs
+            web/test-results
+            web/playwright-report
+          if-no-files-found: ignore
+
+  publish:
+    needs: acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: portpilot-server
+            file: docker/Dockerfile.server
+          - image: portpilot-client
+            file: docker/Dockerfile.client
+          - image: portpilot-web
+            file: web/Dockerfile
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - id: metadata
+        run: git show -s --format='build_time=%cI' "${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ steps.metadata.outputs.build_time }}
+          tags: |
+            ${{ secrets.DOCKER_USER }}/${{ matrix.image }}:${{ github.ref_name }}
+            ${{ secrets.DOCKER_USER }}/${{ matrix.image }}:latest

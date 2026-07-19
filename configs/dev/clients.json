@@ -1,0 +1,49 @@
+{
+  "revision": 1,
+  "client_config": [
+    {
+      "client_id": "dev-client",
+      "client_token": "cG9ydHBpbG90LWRldi10b2tlbi0wMTIzNDU2Nzg5YWJjZGVm",
+      "enabled": true,
+      "proxy_list": [
+        {
+          "proxy_id": "dev-tcp-echo",
+          "remark": "Local TCP echo",
+          "kind": "tunnel",
+          "enabled": true,
+          "data": {
+            "network": "tcp",
+            "transport": "auto",
+            "bind": "127.0.0.1:7000",
+            "connect": "127.0.0.1:18080"
+          }
+        },
+        {
+          "proxy_id": "dev-tcp-direct",
+          "remark": "Local TCP direct echo",
+          "kind": "tunnel",
+          "enabled": true,
+          "data": {
+            "network": "tcp",
+            "transport": "direct",
+            "bind": "127.0.0.1:7002",
+            "connect": "127.0.0.1:18080"
+          }
+        },
+        {
+          "proxy_id": "dev-udp-echo",
+          "remark": "Local UDP echo",
+          "kind": "tunnel",
+          "enabled": true,
+          "data": {
+            "network": "udp",
+            "transport": "smux-datagram",
+            "bind": "127.0.0.1:7001",
+            "connect": "127.0.0.1:18081"
+          }
+        }
+      ]
+    }
+  ]
+}
+

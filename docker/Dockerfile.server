@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1.7
+FROM golang:1.26.5-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X github.com/portpilot/portpilot/internal/version.Version=${VERSION} -X github.com/portpilot/portpilot/internal/version.Commit=${COMMIT} -X github.com/portpilot/portpilot/internal/version.BuildTime=${BUILD_TIME}" \
+    -o /out/portpilot-server ./cmd/portpilot-server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+WORKDIR /var/lib/portpilot
+COPY --from=builder /out/portpilot-server /usr/local/bin/portpilot-server
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/portpilot-server"]
+CMD ["-config", "/etc/portpilot/server.json"]
+

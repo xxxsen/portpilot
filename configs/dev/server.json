@@ -1,0 +1,59 @@
+{
+  "admin_addr": "127.0.0.1:5100",
+  "server_addr": "127.0.0.1:6100",
+  "trusted_proxies": [
+    "127.0.0.1/32"
+  ],
+  "users": [
+    {
+      "user_name": "admin",
+      "password_hash": "$2y$10$/io15KIC2pA.bXQi6J5G0OiLm0T.R.raVU/tokVwDGJolAgSBN2g2"
+    }
+  ],
+  "client_config_file": "./clients.json",
+  "data_db": "../../.dev-data/portpilot.db",
+  "data_plane": {
+    "default_transport": "auto",
+    "direct_fallback": true,
+    "smux": {
+      "protocol_version": 2,
+      "min_sessions": 1,
+      "max_sessions": 4,
+      "max_streams_per_session": 128,
+      "scale_up_streams": 96,
+      "session_max_age": "1h",
+      "drain_timeout": "30s",
+      "keepalive_interval": "20s",
+      "keepalive_timeout": "60s",
+      "max_frame_size": 32768,
+      "max_receive_buffer": 4194304,
+      "max_stream_buffer": 524288
+    },
+    "udp": {
+      "channels_per_proxy": 2,
+      "flow_idle_timeout": "60s",
+      "max_flows_per_proxy": 4096,
+      "max_datagram_size": 65507,
+      "channel_queue_datagrams": 1024
+    }
+  },
+  "timeouts": {
+    "control_handshake": "10s",
+    "heartbeat_interval": "5s",
+    "heartbeat_timeout": "20s",
+    "target_dial": "10s",
+    "data_connect": "15s",
+    "tcp_idle": "10m",
+    "tcp_max_lifetime": "24h"
+  },
+  "limits": {
+    "max_pending_tunnels": 1024,
+    "max_tunnels_per_client": 256,
+    "max_control_message_bytes": 65536,
+    "max_data_handshakes_per_minute": 60000,
+    "max_admin_login_attempts_per_minute": 100,
+    "max_mux_sessions_total": 4096,
+    "max_udp_flows_total": 65536
+  }
+}
+
