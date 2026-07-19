@@ -22,28 +22,35 @@ import type {
 import { Dialog } from "@/components/ui/dialog";
 
 type Range = "1h" | "24h" | "7d" | "30d";
+type ConnectionView = "active" | "history";
 const ranges: Range[] = ["1h", "24h", "7d", "30d"];
 const protocols = ["", "tcp", "udp"];
-const states = ["", "active", "closed", "failed", "interrupted"];
+const historicalStates = ["", "closed", "failed", "interrupted"];
 const sorts = ["accepted_desc", "accepted_asc", "traffic_desc", "duration_desc"];
+const overviewChartMargin = {top: 18, right: 12, bottom: 6, left: 4};
+const detailChartMargin = {top: 16, right: 10, bottom: 6, left: 4};
 
 export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
   const initial = useMemo(() => typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search), []);
   const [view, setView] = useState<"overall" | "client">(initial.get("network_view") === "client" ? "client" : "overall");
+  const [connectionView, setConnectionView] = useState<ConnectionView>(initial.get("connection_view") === "history" ? "history" : "active");
   const initialRange = initial.get("range") ?? "";
-  const initialPage = Number(initial.get("page"));
+  const initialActivePage = Number(initial.get("active_page"));
+  const initialHistoryPage = Number(initial.get("history_page") ?? initial.get("page"));
   const [range, setRange] = useState<Range>(ranges.includes(initialRange as Range) ? initialRange as Range : "24h");
   const [clientID, setClientID] = useState(initial.get("client_id") ?? "");
   const [protocol, setProtocol] = useState(protocols.includes(initial.get("protocol") ?? "") ? initial.get("protocol") ?? "" : "");
-  const [state, setState] = useState(states.includes(initial.get("state") ?? "") ? initial.get("state") ?? "" : "");
+  const [historyState, setHistoryState] = useState(historicalStates.includes(initial.get("state") ?? "") ? initial.get("state") ?? "" : "");
   const [sort, setSort] = useState(sorts.includes(initial.get("sort") ?? "") ? initial.get("sort") ?? "accepted_desc" : "accepted_desc");
   const [query, setQuery] = useState((initial.get("query") ?? "").slice(0, 128));
-  const [page, setPage] = useState(Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1);
+  const [activePage, setActivePage] = useState(Number.isInteger(initialActivePage) && initialActivePage > 0 ? initialActivePage : 1);
+  const [historyPage, setHistoryPage] = useState(Number.isInteger(initialHistoryPage) && initialHistoryPage > 0 ? initialHistoryPage : 1);
   const [summary, setSummary] = useState<NetworkSummary | null>(null);
-  const [connections, setConnections] = useState<Page<NetworkConnection>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
+  const [activeConnections, setActiveConnections] = useState<Page<NetworkConnection>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
+  const [historyConnections, setHistoryConnections] = useState<Page<NetworkConnection>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
   const [clients, setClients] = useState<NetworkClient[]>([]);
   const [detail, setDetail] = useState<NetworkDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadedViews, setLoadedViews] = useState<Record<ConnectionView, boolean>>({active: false, history: false});
   const [stale, setStale] = useState(false);
   const requestSequence = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
@@ -53,15 +60,21 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     const controller = new AbortController();
     activeRequest.current = controller;
     const sequence = ++requestSequence.current;
-    setLoading(true);
     const selectedClient = view === "client" ? clientID : "";
     const summaryParams = new URLSearchParams({range});
     if (selectedClient) summaryParams.set("client_id", selectedClient);
-    const connectionParams = new URLSearchParams({page: String(page), page_size: "25", sort});
+    const connectionParams = new URLSearchParams({
+      scope: connectionView,
+      page: String(connectionView === "active" ? activePage : historyPage),
+      page_size: "25",
+    });
     if (selectedClient) connectionParams.set("client_id", selectedClient);
     if (protocol) connectionParams.set("protocol", protocol);
-    if (state) connectionParams.set("state", state);
     if (query) connectionParams.set("query", query);
+    if (connectionView === "history") {
+      connectionParams.set("sort", sort);
+      if (historyState) connectionParams.set("state", historyState);
+    }
     try {
       const [summaryResult, connectionResult, clientResult] = await Promise.all([
         api<NetworkSummary>(`/api/network/summary?${summaryParams}`, {signal: controller.signal}),
@@ -70,7 +83,9 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
       ]);
       if (sequence !== requestSequence.current) return;
       setSummary(summaryResult);
-      setConnections(connectionResult);
+      if (connectionView === "active") setActiveConnections(connectionResult);
+      else setHistoryConnections(connectionResult);
+      setLoadedViews((current) => current[connectionView] ? current : {...current, [connectionView]: true});
       setClients(clientResult.items);
       setStale(false);
     } catch (caught) {
@@ -79,25 +94,27 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
       setStale(true);
     } finally {
       if (sequence === requestSequence.current) {
-        setLoading(false);
         if (activeRequest.current === controller) activeRequest.current = null;
       }
     }
-  }, [clientID, onUnauthorized, page, protocol, query, range, sort, state, view]);
+  }, [activePage, clientID, connectionView, historyPage, historyState, onUnauthorized, protocol, query, range, sort, view]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     params.set("network_view", view);
+    params.set("connection_view", connectionView);
     params.set("range", range);
     if (view === "client" && clientID) params.set("client_id", clientID);
     else params.delete("client_id");
     setOptionalParam(params, "protocol", protocol);
-    setOptionalParam(params, "state", state);
+    setOptionalParam(params, "state", historyState);
     setOptionalParam(params, "sort", sort === "accepted_desc" ? "" : sort);
     setOptionalParam(params, "query", query);
-    setOptionalParam(params, "page", page === 1 ? "" : String(page));
+    params.delete("page");
+    setOptionalParam(params, "active_page", activePage === 1 ? "" : String(activePage));
+    setOptionalParam(params, "history_page", historyPage === 1 ? "" : String(historyPage));
     window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
-  }, [clientID, page, protocol, query, range, sort, state, view]);
+  }, [activePage, clientID, connectionView, historyPage, historyState, protocol, query, range, sort, view]);
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => void load(), 0);
@@ -130,8 +147,8 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     <section className="section-block first">
       <div className="section-heading network-heading">
         <div className="segmented" aria-label="网络活动视图">
-          <button className={view === "overall" ? "selected" : ""} onClick={() => {setView("overall"); setPage(1);}}>整体</button>
-          <button className={view === "client" ? "selected" : ""} onClick={() => {setView("client"); setPage(1);}}>客户端</button>
+          <button className={view === "overall" ? "selected" : ""} onClick={() => {setView("overall"); setActivePage(1); setHistoryPage(1);}}>整体</button>
+          <button className={view === "client" ? "selected" : ""} onClick={() => {setView("client"); setActivePage(1); setHistoryPage(1);}}>客户端</button>
         </div>
         <div className="segmented compact" aria-label="时间范围">
           {ranges.map((value) => <button key={value} className={range === value ? "selected" : ""} onClick={() => setRange(value)}>{value}</button>)}
@@ -141,7 +158,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
       {view === "client" && (
         <div className="client-selector">
           <label>查看客户端
-            <select value={clientID} onChange={(event) => {setClientID(event.target.value); setPage(1);}}>
+            <select value={clientID} onChange={(event) => {setClientID(event.target.value); setActivePage(1); setHistoryPage(1);}}>
               <option value="">选择客户端</option>
               {clients.map((client) => <option key={client.client_id} value={client.client_id}>{client.client_remark} · {client.client_id}{client.deleted ? "（已删除）" : ""}</option>)}
             </select>
@@ -162,13 +179,13 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         <div className="section-heading"><div><h2>流量趋势</h2><p>实线上传，虚线下载；连接峰值见文本摘要</p></div></div>
         <div className="chart-frame">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={summary?.series ?? []}>
+            <LineChart data={summary?.series ?? []} margin={overviewChartMargin}>
               <CartesianGrid stroke="#e4e9eb" vertical={false} />
               <XAxis dataKey="bucket_at" tickFormatter={(value) => new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})} minTickGap={24} />
-              <YAxis tickFormatter={(value) => formatBytes(value)} width={72} />
+              <YAxis tickFormatter={(value) => formatBytes(value)} tickMargin={8} width={84} />
               <Tooltip labelFormatter={(value) => new Date(Number(value)).toLocaleString()} formatter={(value) => formatBytes(Number(value))} />
-              <Line type="monotone" dataKey="up_bytes" name="上传" stroke="#087f75" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="down_bytes" name="下载" stroke="#b35f20" strokeWidth={2} strokeDasharray="6 4" dot={false} />
+              <Line type="monotone" dataKey="up_bytes" name="上传" stroke="#087f75" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="down_bytes" name="下载" stroke="#b35f20" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -184,21 +201,41 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
           </tbody></table></div>
         </section>
       )}
-      <section className="section-block">
-        <div className="section-heading"><div><h2>连接</h2><p>实时 registry 与 SQLite 历史合并结果</p></div></div>
-        <div className="filter-bar network-filters">
-          <label className="search-control"><Search size={16} /><input aria-label="搜索连接" maxLength={128} value={query} onChange={(event) => {setQuery(event.target.value); setPage(1);}} placeholder="活动、客户端、代理或地址" /></label>
-          <select aria-label="连接协议" value={protocol} onChange={(event) => {setProtocol(event.target.value); setPage(1);}}><option value="">全部协议</option><option value="tcp">TCP</option><option value="udp">UDP</option></select>
-          <select aria-label="连接状态" value={state} onChange={(event) => {setState(event.target.value); setPage(1);}}><option value="">全部状态</option><option value="active">活跃</option><option value="closed">已关闭</option><option value="failed">失败</option><option value="interrupted">已中断</option></select>
-          <select aria-label="连接排序" value={sort} onChange={(event) => setSort(event.target.value)}><option value="accepted_desc">最新优先</option><option value="accepted_asc">最早优先</option><option value="traffic_desc">流量优先</option><option value="duration_desc">时长优先</option></select>
+      <section className="section-block connections-section">
+        <div className="section-heading connections-heading">
+          <div><h2>连接</h2><p>选择查看当前存活连接或已结束的历史连接</p></div>
+          <div className="segmented connection-tabs" aria-label="连接类型">
+            <button className={connectionView === "active" ? "selected" : ""} onClick={() => setConnectionView("active")}>实时连接</button>
+            <button className={connectionView === "history" ? "selected" : ""} onClick={() => setConnectionView("history")}>历史连接</button>
+          </div>
         </div>
-        <div className="table-wrap"><table className="network-connections-table responsive-table"><thead><tr><th>时间</th><th>客户端 / 代理</th><th>协议</th><th>来源 → 目标</th><th>状态</th><th>上传</th><th>下载</th><th className="mobile-table-cell">总流量</th></tr></thead><tbody>
-          {connections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void api<NetworkDetail>(`/api/network/connections/${connection.activity_id}`).then(setDetail)}>
-            <td>{new Date(connection.accepted_at).toLocaleString()}</td><td><strong>{connection.client_remark}</strong><small>{connection.proxy_remark} · {connection.proxy_id}</small></td><td><span className={`network-tag ${connection.protocol}`}>{connection.protocol.toUpperCase()}</span></td><td className="mono address-cell">{connection.external_addr}<br />{connection.target_addr}</td><td>{connection.state}</td><td>{formatBytes(connection.up_bytes)}</td><td>{formatBytes(connection.down_bytes)}</td><td className="mobile-table-cell">{formatBytes(connection.up_bytes + connection.down_bytes)}</td>
-          </tr>)}
-          {!loading && !connections.items.length && <tr><td colSpan={8}><div className="empty-inline">没有符合条件的连接</div></td></tr>}
-        </tbody></table></div>
-        <div className="pagination"><span>共 {connections.total} 条</span><button className="icon-button" disabled={page <= 1} onClick={() => setPage(page - 1)} aria-label="上一页"><ChevronLeft size={17} /></button><span>{page} / {Math.max(connections.total_pages, 1)}</span><button className="icon-button" disabled={page >= connections.total_pages} onClick={() => setPage(page + 1)} aria-label="下一页"><ChevronRight size={17} /></button></div>
+        <div className="filter-bar network-filters">
+          <label className="search-control"><Search size={16} /><input aria-label="搜索连接" maxLength={128} value={query} onChange={(event) => {setQuery(event.target.value); setActivePage(1); setHistoryPage(1);}} placeholder="活动、客户端、代理或地址" /></label>
+          <select aria-label="连接协议" value={protocol} onChange={(event) => {setProtocol(event.target.value); setActivePage(1); setHistoryPage(1);}}><option value="">全部协议</option><option value="tcp">TCP</option><option value="udp">UDP</option></select>
+        </div>
+        {connectionView === "active" ? <section className="connection-panel live-connection-panel">
+          <div className="section-heading"><div><h2>实时连接</h2><p>当前仍存活的连接；速率为服务端最近采样窗口的平均值</p></div><strong className="section-count">{activeConnections.total}</strong></div>
+          <div className="table-wrap"><table className="live-connections-table responsive-table"><thead><tr><th>建链时间</th><th>客户端 / 代理</th><th>协议</th><th>来源 → 目标</th><th>状态 / 采样</th><th>上行速率</th><th>下行速率</th><th>累计流量</th><th className="live-rate-mobile">实时速率</th></tr></thead><tbody>
+            {activeConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void api<NetworkDetail>(`/api/network/connections/${connection.activity_id}`).then(setDetail)}>
+              <td>{new Date(connection.connected_at ?? connection.accepted_at).toLocaleString()}</td><td><strong>{connection.client_remark}</strong><small>{connection.proxy_remark} · {connection.proxy_id}</small></td><td><span className={`network-tag ${connection.protocol}`}>{connection.protocol.toUpperCase()}</span></td><td className="mono address-cell">{connection.external_addr}<br />{connection.target_addr}</td><td>{formatConnectionState(connection.state)}<small>{formatRateWindow(connection.rate_window_millis)}</small></td><td className="rate-cell">{formatRate(connection.up_bytes_per_second)}</td><td className="rate-cell">{formatRate(connection.down_bytes_per_second)}</td><td>{formatBytes(connection.up_bytes + connection.down_bytes)}</td><td className="live-rate-mobile"><strong>↑ {formatRate(connection.up_bytes_per_second)}</strong><small>↓ {formatRate(connection.down_bytes_per_second)}</small></td>
+            </tr>)}
+            {!activeConnections.items.length && <tr><td colSpan={9}><div className="empty-inline">{loadedViews.active ? "当前没有符合条件的实时连接" : "正在加载实时连接"}</div></td></tr>}
+          </tbody></table></div>
+          <Pagination page={activePage} total={activeConnections.total} totalPages={activeConnections.total_pages} onPageChange={setActivePage} label="实时连接" />
+        </section> : <section className="connection-panel history-connection-panel">
+          <div className="section-heading"><div><h2>历史连接</h2><p>已经关闭、失败或中断的连接</p></div><strong className="section-count">{historyConnections.total}</strong></div>
+          <div className="filter-bar history-filters">
+            <select aria-label="历史连接状态" value={historyState} onChange={(event) => {setHistoryState(event.target.value); setHistoryPage(1);}}><option value="">全部结果</option><option value="closed">已关闭</option><option value="failed">失败</option><option value="interrupted">已中断</option></select>
+            <select aria-label="历史连接排序" value={sort} onChange={(event) => {setSort(event.target.value); setHistoryPage(1);}}><option value="accepted_desc">最新优先</option><option value="accepted_asc">最早优先</option><option value="traffic_desc">流量优先</option><option value="duration_desc">时长优先</option></select>
+          </div>
+          <div className="table-wrap"><table className="history-connections-table responsive-table"><thead><tr><th>时间</th><th>客户端 / 代理</th><th>协议</th><th>来源 → 目标</th><th>结果</th><th>上传</th><th>下载</th><th className="mobile-table-cell">总流量</th></tr></thead><tbody>
+            {historyConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void api<NetworkDetail>(`/api/network/connections/${connection.activity_id}`).then(setDetail)}>
+              <td>{new Date(connection.accepted_at).toLocaleString()}</td><td><strong>{connection.client_remark}</strong><small>{connection.proxy_remark} · {connection.proxy_id}</small></td><td><span className={`network-tag ${connection.protocol}`}>{connection.protocol.toUpperCase()}</span></td><td className="mono address-cell">{connection.external_addr}<br />{connection.target_addr}</td><td>{formatConnectionState(connection.state)}</td><td>{formatBytes(connection.up_bytes)}</td><td>{formatBytes(connection.down_bytes)}</td><td className="mobile-table-cell">{formatBytes(connection.up_bytes + connection.down_bytes)}</td>
+            </tr>)}
+            {!historyConnections.items.length && <tr><td colSpan={8}><div className="empty-inline">{loadedViews.history ? "没有符合条件的历史连接" : "正在加载历史连接"}</div></td></tr>}
+          </tbody></table></div>
+          <Pagination page={historyPage} total={historyConnections.total} totalPages={historyConnections.total_pages} onPageChange={setHistoryPage} label="历史连接" />
+        </section>}
       </section>
       <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title="连接详情" description={detail?.activity_id} side>
         {detail && <NetworkDetailView detail={detail} />}
@@ -223,6 +260,7 @@ function NetworkDetailView({detail}: {detail: NetworkDetail}) {
       <dt>断链</dt><dd>{detail.closed_at ? new Date(detail.closed_at).toLocaleString() : "-"}</dd>
       <dt>总时长</dt><dd>{formatDuration(duration)}</dd>
       <dt>上传 / 下载</dt><dd>{formatBytes(detail.up_bytes)} / {formatBytes(detail.down_bytes)}</dd>
+      {!detail.closed_at && <><dt>当前速率</dt><dd>↑ {formatRate(detail.up_bytes_per_second)} / ↓ {formatRate(detail.down_bytes_per_second)}<small>{formatRateWindow(detail.rate_window_millis)}</small></dd></>}
       <dt>UDP 包</dt><dd>{detail.up_packets} / {detail.down_packets}</dd>
       <dt>关闭原因</dt><dd>{detail.close_reason || "-"}<small>{detail.close_reason_code}</small></dd>
     </dl>
@@ -231,13 +269,13 @@ function NetworkDetailView({detail}: {detail: NetworkDetail}) {
         <h3>流量序列</h3>
         <div className="detail-chart">
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={detail.samples ?? []}>
+            <LineChart data={detail.samples ?? []} margin={detailChartMargin}>
               <CartesianGrid stroke="#e4e9eb" vertical={false} />
               <XAxis dataKey="bucket_at" tickFormatter={(value) => new Date(value).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})} minTickGap={24} />
-              <YAxis tickFormatter={(value) => formatBytes(value)} width={68} />
+              <YAxis tickFormatter={(value) => formatBytes(value)} tickMargin={6} width={76} />
               <Tooltip labelFormatter={(value) => new Date(Number(value)).toLocaleString()} formatter={(value) => formatBytes(Number(value))} />
-              <Line type="monotone" dataKey="up_bytes_delta" name="上传" stroke="#087f75" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="down_bytes_delta" name="下载" stroke="#b35f20" strokeWidth={2} strokeDasharray="6 4" dot={false} />
+              <Line type="monotone" dataKey="up_bytes_delta" name="上传" stroke="#087f75" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line type="monotone" dataKey="down_bytes_delta" name="下载" stroke="#b35f20" strokeWidth={2} strokeDasharray="6 4" dot={false} isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -255,6 +293,27 @@ function Metric({label, value}: {label: string; value: string | number}) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
+function Pagination({
+  page,
+  total,
+  totalPages,
+  onPageChange,
+  label,
+}: {
+  page: number;
+  total: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  label: string;
+}) {
+  return <div className="pagination">
+    <span>共 {total} 条</span>
+    <button className="icon-button" disabled={page <= 1} onClick={() => onPageChange(page - 1)} aria-label={`${label}上一页`}><ChevronLeft size={17} /></button>
+    <span>{page} / {Math.max(totalPages, 1)}</span>
+    <button className="icon-button" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)} aria-label={`${label}下一页`}><ChevronRight size={17} /></button>
+  </div>;
+}
+
 function formatBytes(value: number) {
   if (value < 1024) return `${value} B`;
   const units = ["KiB", "MiB", "GiB", "TiB"];
@@ -262,6 +321,28 @@ function formatBytes(value: number) {
   let unit = 0;
   while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit += 1; }
   return `${amount.toFixed(amount >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
+function formatRate(value: number | undefined) {
+  return `${formatBytes(value ?? 0)}/s`;
+}
+
+function formatRateWindow(milliseconds: number | undefined) {
+  if (!milliseconds) return "等待首次采样";
+  const seconds = Math.max(1, Math.round(milliseconds / 1000));
+  return `${seconds} 秒窗口`;
+}
+
+function formatConnectionState(state: string) {
+  return {
+    accepted: "已接受",
+    connecting: "建链中",
+    active: "活跃",
+    closing: "关闭中",
+    closed: "已关闭",
+    failed: "失败",
+    interrupted: "已中断",
+  }[state] ?? state;
 }
 
 function formatDuration(milliseconds: number) {

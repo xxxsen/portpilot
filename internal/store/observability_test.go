@@ -115,6 +115,25 @@ func TestNetworkQueriesAndCleanup(t *testing.T) {
 	if len(detail.Samples) != 1 || detail.Samples[0].DownPacketsDelta != 2 {
 		t.Fatalf("unexpected network detail: %#v", detail)
 	}
+	liveConnection := connection
+	liveConnection.ActivityID = "fedcba9876543210fedcba9876543210"
+	liveConnection.State = "active"
+	liveConnection.ClosedAt = nil
+	liveConnection.UpBytes = 0
+	liveConnection.DownBytes = 0
+	if err := database.CreateNetworkConnection(t.Context(), liveConnection); err != nil {
+		t.Fatal(err)
+	}
+	clients, err := database.ListNetworkClients(t.Context(), NetworkClientQuery{
+		Page: 1, PageSize: 25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clients.Total != 1 || len(clients.Items) != 1 ||
+		clients.Items[0].HistoricalConnections != 1 {
+		t.Fatalf("active connection leaked into client history: %#v", clients)
+	}
 }
 
 func TestCoreQueriesUseBoundedIndexes(t *testing.T) {

@@ -149,6 +149,12 @@ Web 提供搜索、分类、事件、结果、日期、分页和详情 Drawer。
 进程内 activity registry 保存活跃连接、不可变上下文和原子计数。relay 成功读写时只更新
 内存计数，不为每个 chunk 或 datagram 写 SQLite。
 
+registry 使用独立的一秒内存采样计算最近窗口的上下行平均速率，单位为 bytes/s。该采样不
+触发 SQLite 写入，也不与可配置的持久化采样周期绑定。实时快照返回
+`up_bytes_per_second`、`down_bytes_per_second`、`rate_sampled_at` 和
+`rate_window_millis`。这些字段是进程内瞬时观测值，不进入 SQLite；首次采样前速率为零并明确
+标记为等待采样。
+
 有界后台 writer 负责：
 
 - 创建、状态变化和最终连接记录；
@@ -166,19 +172,31 @@ Web 提供搜索、分类、事件、结果、日期、分页和详情 Drawer。
 
 ```http
 GET /api/network/summary?range=24h&client_id=
-GET /api/network/connections?page=1&page_size=25&query=&client_id=&protocol=&state=&date_from=&date_to=&sort=
+GET /api/network/connections?scope=active&page=1&page_size=25&query=&client_id=&protocol=
+GET /api/network/connections?scope=history&page=1&page_size=25&query=&client_id=&protocol=&state=&date_from=&date_to=&sort=
 GET /api/network/connections/{activity_id}
 GET /api/network/clients?page=1&page_size=50&query=
 ```
 
-汇总范围只允许 `1h`、`24h`、`7d` 和 `30d`。连接列表将 registry 与 SQLite 合并并按
-activity ID 去重，实时记录优先。排序只允许接受时间、流量或持续时间的固定枚举。
+汇总范围只允许 `1h`、`24h`、`7d` 和 `30d`。`scope=active` 只读取 registry，返回进程
+当前仍存活的 `accepted`、`connecting`、`active` 或 `closing` 连接；数据库中尚未完成异步
+收尾的记录不能进入实时结果。`scope=history` 只读取 SQLite 中的 `closed`、`failed` 或
+`interrupted` 终态记录。状态与 scope 不兼容时返回 `400 invalid_query`。未传 scope 时保留
+registry 与 SQLite 合并、按 activity ID 去重的兼容行为。排序只允许接受时间、流量或持续
+时间的固定枚举。
 
-Web 提供整体和单客户端视图、时间范围、指标带、流量趋势、客户端汇总、连接筛选/排序/分页
-及连接详情；详情中的细粒度 sample 以独立流量图展示。页面可见时定时刷新，隐藏时停止轮询，
-旧请求通过 `AbortController` 取消。视图、客户端、范围、筛选、排序、搜索和页码保存在 URL
-query 中，刷新或分享链接后可以恢复，URL 不包含 secret。窄屏连接表收敛到时间、对象、状态
-和总流量，其余上下文进入全屏详情。
+Web 提供整体和单客户端视图、时间范围、指标带、流量趋势、客户端汇总及连接详情。“连接”
+使用并排的“实时连接 / 历史连接”双选项，一次只展示用户选中的一栏；两栏保留各自的分页和
+缓存结果。搜索、客户端和协议筛选同时作用于两栏，状态与排序只作用于历史连接。实时表展示
+当前上行/下行速率、采样窗口和累计流量；历史表展示最终状态和累计流量。详情中的细粒度
+sample 以独立流量图展示。
+
+页面可见时只定时刷新当前选中的连接栏，隐藏时停止轮询，旧请求通过 `AbortController` 取消。
+后台刷新期间保留已有数据或等高空态，表格使用固定列布局和等宽数字，趋势图关闭刷新动画，
+避免速率位数或空结果刷新引发页面重排。趋势图在 SVG 绘图区内为坐标轴标签保留安全边距，
+最高、最低刻度以及较长的流量单位不得被容器裁剪。视图、连接栏、客户端、范围、筛选、排序、
+搜索和两个页码保存在 URL query 中，刷新或分享链接后可以恢复，URL 不包含 secret。窄屏实时表
+保留时间、对象和双向速率，历史表保留时间、对象、状态和总流量，其余上下文进入全屏详情。
 
 ## 7. SQLite migrations
 

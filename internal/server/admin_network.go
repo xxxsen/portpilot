@@ -16,6 +16,14 @@ var networkRanges = map[string]time.Duration{
 	"1h": time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour,
 }
 
+var activeNetworkStates = map[string]struct{}{
+	"accepted": {}, "connecting": {}, "active": {}, "closing": {},
+}
+
+var historicalNetworkStates = map[string]struct{}{
+	"closed": {}, "failed": {}, "interrupted": {},
+}
+
 func (a *App) handleNetworkSummary(w http.ResponseWriter, r *http.Request) {
 	rangeName := r.URL.Query().Get("range")
 	if rangeName == "" {
@@ -75,6 +83,38 @@ func (a *App) handleNetworkConnections(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query", "detail": err.Error()})
 		return
 	}
+	query, err = store.NormalizeNetworkQuery(query)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query", "detail": err.Error()})
+		return
+	}
+	if err := validateNetworkScope(query); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query", "detail": err.Error()})
+		return
+	}
+	switch query.Scope {
+	case "active":
+		active := make([]store.NetworkConnection, 0)
+		for _, connection := range a.Activity.Snapshot() {
+			if matchesNetworkQuery(connection, query) {
+				active = append(active, connection)
+			}
+		}
+		sortNetworkConnections(active, query.Sort)
+		writeJSON(w, http.StatusOK, paginateNetworkConnections(active, query, int64(len(active))))
+		return
+	case "history":
+		if len(query.States) == 0 {
+			query.States = []string{"closed", "failed", "interrupted"}
+		}
+		result, listErr := a.Events.ListNetworkConnections(r.Context(), query)
+		if listErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_query", "detail": listErr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
 	needed := query.Page * query.PageSize
 	fetchPages := (needed + 99) / 100
 	if fetchPages < 1 {
@@ -111,27 +151,55 @@ func (a *App) handleNetworkConnections(w http.ResponseWriter, r *http.Request) {
 		merged = append(merged, connection)
 	}
 	sortNetworkConnections(merged, query.Sort)
-	start := (query.Page - 1) * query.PageSize
-	end := start + query.PageSize
-	items := []store.NetworkConnection{}
-	if start < len(merged) {
-		if end > len(merged) {
-			end = len(merged)
-		}
-		items = merged[start:end]
-	}
 	total := historicalTotal
 	if int64(len(byID)) > total {
 		total = int64(len(byID))
+	}
+	writeJSON(w, http.StatusOK, paginateNetworkConnections(merged, query, total))
+}
+
+func validateNetworkScope(query store.NetworkQuery) error {
+	var allowed map[string]struct{}
+	switch query.Scope {
+	case "":
+		return nil
+	case "active":
+		allowed = activeNetworkStates
+	case "history":
+		allowed = historicalNetworkStates
+	default:
+		return fmt.Errorf("invalid scope %q", query.Scope)
+	}
+	for _, state := range query.States {
+		if _, ok := allowed[state]; !ok {
+			return fmt.Errorf("state %q is incompatible with scope %q", state, query.Scope)
+		}
+	}
+	return nil
+}
+
+func paginateNetworkConnections(
+	items []store.NetworkConnection,
+	query store.NetworkQuery,
+	total int64,
+) store.NetworkPage {
+	start := (query.Page - 1) * query.PageSize
+	end := start + query.PageSize
+	pageItems := []store.NetworkConnection{}
+	if start < len(items) {
+		if end > len(items) {
+			end = len(items)
+		}
+		pageItems = items[start:end]
 	}
 	totalPages := 0
 	if total > 0 {
 		totalPages = int((total + int64(query.PageSize) - 1) / int64(query.PageSize))
 	}
-	writeJSON(w, http.StatusOK, store.NetworkPage{
-		Items: items, Page: query.Page, PageSize: query.PageSize,
+	return store.NetworkPage{
+		Items: pageItems, Page: query.Page, PageSize: query.PageSize,
 		Total: total, TotalPages: totalPages,
-	})
+	}
 }
 
 func (a *App) handleNetworkConnectionDetail(w http.ResponseWriter, r *http.Request) {

@@ -65,7 +65,8 @@ func networkQueryFromRequest(r *http.Request) (store.NetworkQuery, error) {
 	return store.NetworkQuery{
 		Page: page, PageSize: pageSize, Query: r.URL.Query().Get("query"),
 		ClientID: r.URL.Query().Get("client_id"), Protocol: r.URL.Query().Get("protocol"),
-		States: states, DateFrom: from, DateTo: to, Sort: r.URL.Query().Get("sort"),
+		Scope: r.URL.Query().Get("scope"), States: states,
+		DateFrom: from, DateTo: to, Sort: r.URL.Query().Get("sort"),
 	}, nil
 }
 

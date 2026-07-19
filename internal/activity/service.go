@@ -18,6 +18,8 @@ import (
 
 var ErrLimitReached = errors.New("network activity limit reached")
 
+const rateSampleInterval = time.Second
+
 type Config struct {
 	SampleInterval   time.Duration
 	CleanupInterval  time.Duration
@@ -56,21 +58,27 @@ type Handle struct {
 	sessionEpoch uint64
 	acceptedAt   int64
 
-	state              atomic.Pointer[string]
-	connectedAt        atomic.Int64
-	lastActivityAt     atomic.Int64
-	closedAt           atomic.Int64
-	upBytes            atomic.Int64
-	downBytes          atomic.Int64
-	upPackets          atomic.Int64
-	downPackets        atomic.Int64
-	sampledUpBytes     atomic.Int64
-	sampledDownBytes   atomic.Int64
-	sampledUpPackets   atomic.Int64
-	sampledDownPackets atomic.Int64
-	closeReasonCode    atomic.Pointer[string]
-	closeReason        atomic.Pointer[string]
-	closed             atomic.Bool
+	state                atomic.Pointer[string]
+	connectedAt          atomic.Int64
+	lastActivityAt       atomic.Int64
+	closedAt             atomic.Int64
+	upBytes              atomic.Int64
+	downBytes            atomic.Int64
+	upPackets            atomic.Int64
+	downPackets          atomic.Int64
+	sampledUpBytes       atomic.Int64
+	sampledDownBytes     atomic.Int64
+	sampledUpPackets     atomic.Int64
+	sampledDownPackets   atomic.Int64
+	rateSampledUpBytes   atomic.Int64
+	rateSampledDownBytes atomic.Int64
+	upBytesPerSecond     atomic.Int64
+	downBytesPerSecond   atomic.Int64
+	rateSampledAt        atomic.Int64
+	rateWindowMillis     atomic.Int64
+	closeReasonCode      atomic.Pointer[string]
+	closeReason          atomic.Pointer[string]
+	closed               atomic.Bool
 }
 
 type writeCommand struct {
@@ -117,9 +125,10 @@ func New(database *store.Store, config Config, logger *slog.Logger) (*Service, e
 		low:      make(chan writeCommand, 32768),
 		ctx:      ctx, cancel: cancel,
 	}
-	service.wg.Add(3)
+	service.wg.Add(4)
 	go service.writer()
 	go service.sampler()
+	go service.rateSampler()
 	go service.cleaner()
 	return service, nil
 }
@@ -147,6 +156,7 @@ func (s *Service) Start(input Start) (*Handle, error) {
 	handle.setState("accepted")
 	handle.setTransport(input.Transport)
 	handle.lastActivityAt.Store(now)
+	handle.rateSampledAt.Store(now)
 	handle.setCloseReason("", "")
 
 	s.mu.Lock()
@@ -316,7 +326,11 @@ func (h *Handle) Snapshot() store.NetworkConnection {
 		LastActivityAt: h.lastActivityAt.Load(),
 		UpBytes:        h.upBytes.Load(), DownBytes: h.downBytes.Load(),
 		UpPackets: h.upPackets.Load(), DownPackets: h.downPackets.Load(),
-		CloseReasonCode: reasonCode, CloseReason: reason,
+		UpBytesPerSecond:   h.upBytesPerSecond.Load(),
+		DownBytesPerSecond: h.downBytesPerSecond.Load(),
+		RateSampledAt:      h.rateSampledAt.Load(),
+		RateWindowMillis:   h.rateWindowMillis.Load(),
+		CloseReasonCode:    reasonCode, CloseReason: reason,
 	}
 	if value := h.connectedAt.Load(); value > 0 {
 		connection.ConnectedAt = &value
@@ -459,15 +473,58 @@ func (s *Service) sampleAll() {
 	}
 }
 
+func (s *Service) rateSampler() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(rateSampleInterval)
+	defer ticker.Stop()
+	handles := make([]*Handle, 0)
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			handles = s.sampleRates(handles)
+		}
+	}
+}
+
+func (s *Service) sampleRates(handles []*Handle) []*Handle {
+	clear(handles)
+	handles = handles[:0]
+	s.mu.RLock()
+	for _, handle := range s.active {
+		handles = append(handles, handle)
+	}
+	s.mu.RUnlock()
+	for _, handle := range handles {
+		s.sampleRate(handle)
+	}
+	return handles
+}
+
+func (s *Service) sampleRate(handle *Handle) {
+	upBytes := delta(&handle.rateSampledUpBytes, handle.upBytes.Load())
+	downBytes := delta(&handle.rateSampledDownBytes, handle.downBytes.Load())
+	now := time.Now().UTC().UnixMilli()
+	previousRateAt := handle.rateSampledAt.Swap(now)
+	rateWindow := now - previousRateAt
+	if rateWindow <= 0 {
+		return
+	}
+	handle.rateWindowMillis.Store(rateWindow)
+	handle.upBytesPerSecond.Store(bytesPerSecond(upBytes, rateWindow))
+	handle.downBytesPerSecond.Store(bytesPerSecond(downBytes, rateWindow))
+}
+
 func (s *Service) sampleHandle(handle *Handle, final bool) {
 	upBytes := delta(&handle.sampledUpBytes, handle.upBytes.Load())
 	downBytes := delta(&handle.sampledDownBytes, handle.downBytes.Load())
 	upPackets := delta(&handle.sampledUpPackets, handle.upPackets.Load())
 	downPackets := delta(&handle.sampledDownPackets, handle.downPackets.Load())
+	now := time.Now().UTC().UnixMilli()
 	if upBytes == 0 && downBytes == 0 && upPackets == 0 && downPackets == 0 && !final {
 		return
 	}
-	now := time.Now().UTC().UnixMilli()
 	bucket := sampleBucket(now, s.config.SampleInterval)
 	sample := store.NetworkSample{
 		ActivityID: handle.activityID, BucketAt: bucket,
@@ -505,6 +562,24 @@ func delta(previous *atomic.Int64, current int64) int64 {
 		return 0
 	}
 	return current - old
+}
+
+func bytesPerSecond(bytes, windowMillis int64) int64 {
+	if bytes <= 0 || windowMillis <= 0 {
+		return 0
+	}
+	const maxInt64 = int64(^uint64(0) >> 1)
+	whole := bytes / windowMillis
+	remainder := bytes % windowMillis
+	if whole > maxInt64/1000 || remainder > maxInt64/1000 {
+		return maxInt64
+	}
+	scaledWhole := whole * 1000
+	scaledRemainder := remainder * 1000 / windowMillis
+	if scaledWhole > maxInt64-scaledRemainder {
+		return maxInt64
+	}
+	return scaledWhole + scaledRemainder
 }
 
 func sampleBucket(value int64, interval time.Duration) int64 {

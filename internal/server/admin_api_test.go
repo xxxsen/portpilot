@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/store"
 	"golang.org/x/crypto/bcrypt"
@@ -200,4 +201,82 @@ func TestConfigDiffNeverContainsClientToken(t *testing.T) {
 	if len(changes) != 1 || changes[0].After["remark"] != "After" {
 		t.Fatalf("unexpected configuration diff: %#v", changes)
 	}
+}
+
+func TestNetworkConnectionsSeparateActiveAndHistory(t *testing.T) {
+	t.Parallel()
+	database, err := store.Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	activityService, err := activity.New(database, activity.Config{
+		SampleInterval: time.Hour, CleanupInterval: time.Hour,
+		AuditRetention: time.Hour, NetworkRetention: time.Hour,
+		SampleRetention: time.Hour, MaxActive: 10,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(activityService.Close)
+	app := &App{Events: database, Activity: activityService}
+
+	active, err := activityService.Start(activity.Start{
+		Protocol: "tcp", ClientID: "client-live", ClientRemark: "Live",
+		ProxyID: "proxy-live", ProxyRemark: "Live proxy",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.Connected()
+	active.AddUp(2048, 0)
+	active.AddDown(1024, 0)
+
+	now := time.Now().UTC().UnixMilli()
+	closedAt := now
+	if err := database.CreateNetworkConnection(t.Context(), store.NetworkConnection{
+		ActivityID: "00000000000000000000000000000001",
+		Protocol:   "udp", State: "closed", ClientID: "client-old",
+		ClientRemark: "Old", ProxyID: "proxy-old", ProxyRemark: "Old proxy",
+		AcceptedAt: now - 1000, LastActivityAt: now, ClosedAt: &closedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	activePage := requestNetworkPage(t, app, "/api/network/connections?scope=active&page=1&page_size=25")
+	if activePage.Total != 1 || len(activePage.Items) != 1 ||
+		activePage.Items[0].ActivityID != active.ID() {
+		t.Fatalf("active scope returned non-live connections: %#v", activePage)
+	}
+	historyPage := requestNetworkPage(t, app, "/api/network/connections?scope=history&page=1&page_size=25")
+	if historyPage.Total != 1 || len(historyPage.Items) != 1 ||
+		historyPage.Items[0].ActivityID != "00000000000000000000000000000001" {
+		t.Fatalf("history scope returned live connections: %#v", historyPage)
+	}
+
+	request := httptest.NewRequestWithContext(
+		t.Context(), http.MethodGet,
+		"/api/network/connections?scope=active&state=closed",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	app.handleNetworkConnections(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("incompatible scope status = %d, body=%s", response.Code, response.Body.String())
+	}
+}
+
+func requestNetworkPage(t *testing.T, app *App, target string) store.NetworkPage {
+	t.Helper()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+	response := httptest.NewRecorder()
+	app.handleNetworkConnections(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("network page status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var page store.NetworkPage
+	if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	return page
 }

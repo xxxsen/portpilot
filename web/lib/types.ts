@@ -115,6 +115,10 @@ export type NetworkConnection = {
   down_bytes: number;
   up_packets: number;
   down_packets: number;
+  up_bytes_per_second: number;
+  down_bytes_per_second: number;
+  rate_sampled_at: number;
+  rate_window_millis: number;
   close_reason_code: string;
   close_reason: string;
 };

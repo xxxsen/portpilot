@@ -16,6 +16,27 @@ async function navigate(page: Page, label: "客户端" | "代理规则" | "网�
   await page.getByRole("button", {name: label}).click();
 }
 
+async function expectYAxisLabelsInsideChart(page: Page) {
+  const chart = page.locator(".chart-frame");
+  const svg = chart.locator("svg");
+  const ticks = chart.locator(".recharts-yAxis .recharts-cartesian-axis-tick-value");
+  await expect(ticks.first()).toBeVisible();
+
+  const svgBox = await svg.boundingBox();
+  expect(svgBox).not.toBeNull();
+  const tickBoxes = await ticks.evaluateAll((elements) => elements.map((element) => {
+    const box = element.getBoundingClientRect();
+    return {top: box.top, right: box.right, bottom: box.bottom, left: box.left};
+  }));
+  expect(tickBoxes.length).toBeGreaterThan(0);
+  for (const box of tickBoxes) {
+    expect(box.top).toBeGreaterThanOrEqual(svgBox!.y);
+    expect(box.left).toBeGreaterThanOrEqual(svgBox!.x);
+    expect(box.right).toBeLessThanOrEqual(svgBox!.x + svgBox!.width);
+    expect(box.bottom).toBeLessThanOrEqual(svgBox!.y + svgBox!.height);
+  }
+}
+
 async function logout(page: Page) {
   const menu = page.getByRole("button", {name: "打开导航"});
   if (await menu.isVisible()) await menu.click();
@@ -148,7 +169,14 @@ test("live status and audit views expose the formal server state", async ({page}
 
   await navigate(page, "网络活动");
   await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
-  const networkResponse = await page.request.get("/backend/api/network/connections?page=1&page_size=25");
+  await expect(page.getByRole("button", {name: "24h"})).toHaveClass(/selected/);
+  await expectYAxisLabelsInsideChart(page);
+  await expect(page.getByRole("heading", {name: "实时连接"})).toBeVisible();
+  await expect(page.locator(".live-connections-table th:visible").filter({hasText: /上行速率|实时速率/})).toBeVisible();
+  await page.getByRole("button", {name: "历史连接"}).click();
+  await expect(page.getByRole("heading", {name: "历史连接"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "实时连接"})).toHaveCount(0);
+  const networkResponse = await page.request.get("/backend/api/network/connections?scope=history&page=1&page_size=25");
   expect(networkResponse.ok()).toBeTruthy();
   const network = await networkResponse.json() as {
     items: Array<{proxy_id: string}>;

@@ -11,28 +11,32 @@ import (
 )
 
 type NetworkConnection struct {
-	ActivityID      string `json:"activity_id"`
-	Protocol        string `json:"protocol"`
-	State           string `json:"state"`
-	ClientID        string `json:"client_id"`
-	ClientRemark    string `json:"client_remark"`
-	ProxyID         string `json:"proxy_id"`
-	ProxyRemark     string `json:"proxy_remark"`
-	ExternalAddr    string `json:"external_addr"`
-	ServerBind      string `json:"server_bind"`
-	TargetAddr      string `json:"target_addr"`
-	Transport       string `json:"transport"`
-	SessionEpoch    uint64 `json:"session_epoch"`
-	AcceptedAt      int64  `json:"accepted_at"`
-	ConnectedAt     *int64 `json:"connected_at,omitempty"`
-	LastActivityAt  int64  `json:"last_activity_at"`
-	ClosedAt        *int64 `json:"closed_at,omitempty"`
-	UpBytes         int64  `json:"up_bytes"`
-	DownBytes       int64  `json:"down_bytes"`
-	UpPackets       int64  `json:"up_packets"`
-	DownPackets     int64  `json:"down_packets"`
-	CloseReasonCode string `json:"close_reason_code"`
-	CloseReason     string `json:"close_reason"`
+	ActivityID         string `json:"activity_id"`
+	Protocol           string `json:"protocol"`
+	State              string `json:"state"`
+	ClientID           string `json:"client_id"`
+	ClientRemark       string `json:"client_remark"`
+	ProxyID            string `json:"proxy_id"`
+	ProxyRemark        string `json:"proxy_remark"`
+	ExternalAddr       string `json:"external_addr"`
+	ServerBind         string `json:"server_bind"`
+	TargetAddr         string `json:"target_addr"`
+	Transport          string `json:"transport"`
+	SessionEpoch       uint64 `json:"session_epoch"`
+	AcceptedAt         int64  `json:"accepted_at"`
+	ConnectedAt        *int64 `json:"connected_at,omitempty"`
+	LastActivityAt     int64  `json:"last_activity_at"`
+	ClosedAt           *int64 `json:"closed_at,omitempty"`
+	UpBytes            int64  `json:"up_bytes"`
+	DownBytes          int64  `json:"down_bytes"`
+	UpPackets          int64  `json:"up_packets"`
+	DownPackets        int64  `json:"down_packets"`
+	UpBytesPerSecond   int64  `json:"up_bytes_per_second"`
+	DownBytesPerSecond int64  `json:"down_bytes_per_second"`
+	RateSampledAt      int64  `json:"rate_sampled_at"`
+	RateWindowMillis   int64  `json:"rate_window_millis"`
+	CloseReasonCode    string `json:"close_reason_code"`
+	CloseReason        string `json:"close_reason"`
 }
 
 type NetworkSample struct {
@@ -60,6 +64,7 @@ type HourlyRollup struct {
 type NetworkQuery struct {
 	Page     int
 	PageSize int
+	Scope    string
 	Query    string
 	ClientID string
 	Protocol string
@@ -271,7 +276,7 @@ func (s *Store) InterruptOpenConnections(ctx context.Context, at int64) (int64, 
 }
 
 func (s *Store) ListNetworkConnections(ctx context.Context, query NetworkQuery) (NetworkPage, error) {
-	query, err := normalizeNetworkQuery(query)
+	query, err := NormalizeNetworkQuery(query)
 	if err != nil {
 		return NetworkPage{}, err
 	}
@@ -352,7 +357,7 @@ func scanNetworkConnection(scanner rowScanner) (NetworkConnection, error) {
 	return connection, nil
 }
 
-func normalizeNetworkQuery(query NetworkQuery) (NetworkQuery, error) {
+func NormalizeNetworkQuery(query NetworkQuery) (NetworkQuery, error) {
 	if query.Page <= 0 {
 		query.Page = 1
 	}
@@ -575,11 +580,11 @@ func (s *Store) ListNetworkClients(
 	if len(query.Query) > maxSearchLength {
 		return NetworkClientPage{}, fmt.Errorf("query exceeds %d characters", maxSearchLength)
 	}
-	where := ""
+	where := " WHERE state IN ('closed', 'failed', 'interrupted')"
 	arguments := []any{}
 	if query.Query != "" {
 		value := "%" + escapeLike(query.Query) + "%"
-		where = ` WHERE client_id LIKE ? ESCAPE '\' OR client_remark LIKE ? ESCAPE '\'`
+		where += ` AND (client_id LIKE ? ESCAPE '\' OR client_remark LIKE ? ESCAPE '\')`
 		arguments = append(arguments, value, value)
 	}
 	var total int64
