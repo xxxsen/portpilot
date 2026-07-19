@@ -11,7 +11,7 @@ PortPilot 是一个由服务端集中管理代理规则的内网反向代理工�
 - UDP 在公网端和内网端保持 UDP，服务端与客户端之间使用 UDP-over-smux/TCP。
 - 代理配置文件是事实来源；SQLite 只保存可丢弃的事件、流量和审计信息。
 
-完整协议、安全、生命周期和验收设计见 [td/portpilot-design.md](td/portpilot-design.md)。
+完整协议、安全、生命周期和验收设计见 [docs/001-portpilot-design.md](docs/001-portpilot-design.md)。
 
 ## 本地开发
 

@@ -1,9 +1,131 @@
 # PortPilot Engineering Contract
 
-- `cmd/portpilot-server` and `cmd/portpilot-client` are the only production and development process entrypoints.
-- Full-service tests must start services through `make dev`. Test fixtures may provide targets, never alternate PortPilot implementations.
-- Proxy configuration files are the source of truth. SQLite must remain disposable.
-- The Go server must not implement TLS. TLS terminates at the deployment Nginx boundary.
-- Control traffic remains outside smux. TCP and UDP-over-TCP data streams require session-bound one-time tickets.
-- Do not add Docker or Compose runtime targets. The Makefile may only build the three release images.
-- Before delivery, run the gates relevant to the change. Never lower lint or test requirements to make a change pass.
+## 1. 信息来源
+
+- `docs/` 保存已经实施、可长期维护的正式文档。
+- `td/` 只保存尚未完整实施或仍在评审的临时方案。
+- 架构、协议、安全、配置和运行时约束以 `docs/` 中的正式文档为准，不在本文件重复维护。
+- 修改能力前先阅读相关正式文档、代码和测试；发现不一致时同步修正，不能长期保留两套口径。
+- `Makefile` 是构建和门禁命令的统一入口。
+
+目录职责保持简单：
+
+- `cmd/`、`internal/`：正式 Go 入口和核心实现。
+- `web/`：管理后台及前端测试。
+- `configs/`：配置示例。
+- `test/`：integration、acceptance 和 fixture。
+- `scripts/`：开发与验收脚本。
+- `docs/`：正式文档。
+- `td/`：临时方案。
+
+## 2. 文档生命周期
+
+### 2.1 命名
+
+- `td/` 和 `docs/` 下的 Markdown 文件统一命名为 `{三位编号}-{文档描述}.md`，例如 `001-portpilot-design.md`。
+- 编号使用三位十进制数字并补零，描述默认使用简洁的小写 kebab-case。
+- 同一主题从 `td/` 晋升到 `docs/` 时保留原编号和文件名。
+- 编号在两个目录之间保持唯一，不随意重排已发布编号。
+
+### 2.2 从方案到正式文档
+
+- 新方案先写入 `td/`，可以包含待确认问题、方案比较、实施步骤、临时 TODO 和验收计划。
+- 尚未完成实现或验收的方案必须留在 `td/`，不能提前移动到 `docs/`。
+- 方案完成后，依据最终实现重写为可独立阅读的正式文档。
+- 正式文档保留稳定行为、接口契约、配置语义、安全边界、运维约束和验证方法。
+- 删除讨论过程、已完成清单、临时 TODO、现场输出、偶然测试计数、PID、token、数据库记录和其他易变信息。
+- 晋升后删除对应 `td/` 文件，不能保留两份并行真源。
+- 同步更新 README、代码注释和仓库内链接，使其指向 `docs/`。
+
+### 2.3 临时文档引用边界
+
+- `docs/` 中的任何文档不得引用 `td/` 中的设计文档。
+- 正式代码、代码注释、配置、脚本、测试和 README 不得引用 `td/` 中的设计文档。
+- 实现时可以阅读当前任务的临时方案，但不能把该路径固化到正式产物。
+- 正式实施结果必须能够在删除整个 `td/` 后继续构建、测试和独立阅读。
+- 交付前搜索 `td/` 文档路径，确认引用只存在于临时方案内部或本文件的治理规则中。
+
+### 2.4 正式文档维护
+
+- 用户流程、接口、配置、协议、安全边界或运维方式变化时，同步更新相关 `docs/` 文档。
+- 正式文档必须以当前实现为准，并能在仓库内独立阅读。
+- 正式文档只记录稳定信息，不保存某次执行的通过数量、日志片段或发布现场状态。
+
+## 3. 修改与质量底线
+
+- 先读相关实现、测试和正式文档，不凭假设修改。
+- 优先沿用现有模块、接口和错误处理方式。
+- 改动保持在任务所需范围，不顺带重构无关代码。
+- 新增抽象必须解决实际复杂度或符合现有模式。
+- 网络和并发代码必须有明确 owner、取消路径、deadline、资源上限和关闭顺序。
+- 配置与协议使用结构化解析和严格校验。
+- secret 不得进入日志、API 查询、Web 持久化存储或测试工件。
+- 不得回退、覆盖或清理用户的无关改动。
+
+未经用户明确许可，禁止：
+
+- 放宽 lint、类型、race、测试或安全规则。
+- 删除测试、减少断言或缩短关键故障场景来规避失败。
+- 添加无必要的忽略注释或静默吞错。
+- 修改 CI、Makefile 或脚本来跳过原有检查。
+- 在必跑门禁失败或未执行时宣称完成。
+
+## 4. 测试与门禁
+
+### 4.1 测试纪律
+
+- 新增或修改行为时，至少覆盖与风险匹配的正常路径、错误路径和边界条件。
+- 网络、并发或安全改动还应覆盖取消、超时、断线、重连、重放、资源上限和资源回收。
+- 单元测试靠近被测包；跨模块和真实 socket 行为放入 `test/integration/`；浏览器流程放入 `web/e2e/`。
+- fixture 只能提供被代理目标，不能实现替代版 PortPilot。
+- 常规测试使用 loopback、临时目录和开发配置，不依赖真实公网或生产内网资产。
+- 测试必须有有界超时并能确定性清理资源。
+- 不设置覆盖率百分比阈值，但关键行为必须有测试。
+
+### 4.2 必跑门禁
+
+缺少工具时先运行 `make bootstrap` 和 `make doctor`。
+
+| 改动范围 | 交付前必须通过 |
+| --- | --- |
+| 仅文档 | 校验命名和链接；清理禁止的 `td` 引用；`git diff --check` |
+| 任何代码 | `make ci` |
+| Go 聚焦检查 | 开发中可先运行 `make lint-go`、`make test`、`make test-race`、`make integration-test`；交付仍需 `make ci` |
+| Web 用户流程 | `make ci`；在 `make dev` 上运行 `make smoke-dev`、`make web-e2e` |
+| 配置、Shell、Nginx | `make lint-shell`、`make config-check`、`make lint`；影响启动或路由时追加 `make dev`、`make smoke-dev` |
+| 鉴权、协议、session、listener、数据面 | `make ci`；在 `make dev` 上运行 `make smoke-dev`、`make fault-test` |
+| 并发、drain、连接池、UDP flow、资源回收 | 上述核心门禁并追加 `make soak-test` |
+| Dockerfile 或镜像 | `make dockerfile-lint`、`make build-images` |
+| 发布、发布链路或跨核心模块 | `make acceptance` |
+
+不能用零散子命令成功替代失败的 `make ci`。不得缩短默认发布验收后仍声称完成了完整 acceptance。
+
+### 4.3 全链路测试
+
+- 完整服务测试只通过 `make dev` 启动正式 server、client、Web 和目标 fixture。
+- `make smoke-dev`、`make web-e2e`、`make fault-test` 和 `make soak-test` 连接同一套 dev 进程。
+- 不增加测试专用 PortPilot 服务端，也不使用 Docker 镜像或 Compose 代替功能测试。
+- Makefile 只提供三个正式镜像的构建命令，不提供 Docker/Compose 运行、容器 smoke 或容器测试目标。
+- 测试结束后停止 dev 环境并确认没有残留进程和监听端口。
+- 失败时检查 `.dev-data/logs/`、快照和 Playwright 工件，不能只重复运行等待偶然通过。
+
+## 5. Review 与交付
+
+完成实现后主动检查：
+
+- 是否引入安全、数据完整性或主链路回归。
+- 是否遗漏错误路径、边界条件、并发和恢复测试。
+- 是否存在 goroutine、连接、文件描述符、队列或状态泄漏。
+- 是否造成代码、配置、README 和正式文档不一致。
+- 是否残留 docs/代码到 `td` 设计文档的引用。
+
+交付说明必须包含：
+
+- 修改内容和关键理由。
+- 新增或更新的测试。
+- 实际执行的门禁及结果。
+- 未执行的必需门禁及原因。
+- 文档、配置和部署示例是否同步。
+- 残余风险或未解决问题。
+
+必跑门禁失败、未执行且没有合理说明，或完整服务仍有残留进程时，不能宣称任务完成。
