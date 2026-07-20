@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -35,7 +35,7 @@ func TestAdminLoginUsesSelectedAbsoluteTTL(t *testing.T) {
 		Admin: NewAdminAuth([]config.User{{
 			UserName: "admin", PasswordHash: string(hash),
 		}}, 10),
-		Events: database, Logger: slog.Default(),
+		Events: database, Logger: zap.NewNop(),
 	}
 	request := httptest.NewRequestWithContext(
 		t.Context(), http.MethodPost, "/api/auth/login",
@@ -92,7 +92,7 @@ func TestClientManagementAPICreatesAndRedactsToken(t *testing.T) {
 	}
 	app := &App{
 		Config: cfg, ConfigManager: manager, Events: database,
-		Admin: NewAdminAuth(nil, 10), Logger: slog.Default(),
+		Admin: NewAdminAuth(nil, 10), Logger: zap.NewNop(),
 	}
 	app.Sessions = NewSessionManager(app)
 	app.Listeners = NewListenerManager(app)

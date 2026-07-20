@@ -12,6 +12,7 @@ import (
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 var controlUpgrader = websocket.Upgrader{
@@ -168,11 +169,19 @@ func (a *App) runControlSession(session *Session) {
 	select {
 	case err := <-writerErr:
 		if err != nil {
-			a.Logger.Info("control writer stopped", "client_id", session.ClientID, "error", err)
+			a.Logger.Info(
+				"control writer stopped",
+				zap.String("client_id", session.ClientID),
+				zap.Error(err),
+			)
 		}
 	case err := <-readErr:
 		if err != nil && !errors.Is(err, websocket.ErrCloseSent) {
-			a.Logger.Info("control reader stopped", "client_id", session.ClientID, "error", err)
+			a.Logger.Info(
+				"control reader stopped",
+				zap.String("client_id", session.ClientID),
+				zap.Error(err),
+			)
 		}
 	case <-session.ctx.Done():
 	}

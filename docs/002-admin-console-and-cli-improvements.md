@@ -289,7 +289,7 @@ make soak-test
 fixture 不实现 PortPilot 控制、鉴权、smux 或代理逻辑。
 
 确定性门禁使用 `make ci`，覆盖 Go/Web lint、类型检查、构建、单元测试、race、migration
-规则和真实 loopback 集成测试。`master` 合并验收使用 `make acceptance`，默认执行 15 分钟
+规则和真实 loopback 集成测试。PR 合并进入 `master` 后使用 `make acceptance`，默认执行 15 分钟
 soak；正式版本 tag 不重复验收。镜像只通过
 `make build-images` 构建 `portpilot-server`、`portpilot-client` 和 `portpilot-web`；
 仓库不提供 Docker/Compose 运行目标。

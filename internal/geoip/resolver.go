@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -18,6 +17,8 @@ import (
 	"time"
 
 	"github.com/oschwald/maxminddb-golang/v2"
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 )
 
 const defaultCacheCapacity = 65536
@@ -62,7 +63,7 @@ type readerState struct {
 type Resolver struct {
 	path           string
 	reloadInterval time.Duration
-	logger         *slog.Logger
+	logger         *zap.Logger
 
 	reader atomic.Pointer[readerState]
 
@@ -85,12 +86,12 @@ type Resolver struct {
 	reloadFailure  atomic.Uint64
 }
 
-func New(path string, reloadInterval time.Duration, logger *slog.Logger) (*Resolver, error) {
+func New(path string, reloadInterval time.Duration, logger *zap.Logger) (*Resolver, error) {
 	if reloadInterval <= 0 {
 		return nil, errors.New("geoip reload interval must be positive")
 	}
 	if logger == nil {
-		logger = slog.Default()
+		logger = logutil.GetLogger(context.Background())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	resolver := &Resolver{
@@ -212,7 +213,7 @@ func (r *Resolver) reloader() {
 			if err := r.reload(false); err != nil {
 				r.reloadFailure.Add(1)
 				r.setError(err)
-				r.logger.Warn("geoip database reload failed", "error", err)
+				r.logger.Warn("geoip database reload failed", zap.Error(err))
 			}
 		}
 	}
@@ -252,7 +253,10 @@ func (r *Resolver) reload(required bool) error {
 	r.lastError.Store(nil)
 	r.reloadSuccess.Add(1)
 	if !required {
-		r.logger.Info("geoip country database reloaded", "fingerprint", fingerprint)
+		r.logger.Info(
+			"geoip country database reloaded",
+			zap.String("fingerprint", fingerprint),
+		)
 	}
 	return nil
 }

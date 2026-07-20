@@ -16,23 +16,25 @@ import (
 	"time"
 	"unicode/utf8"
 
+	commonlogger "github.com/xxxsen/common/logger"
 	"golang.org/x/crypto/bcrypt"
 )
 
 const RedactionMarker = "__REDACTED__"
 
 type ServerConfig struct {
-	AdminAddr        string              `json:"admin_addr"`
-	ServerAddr       string              `json:"server_addr"`
-	TrustedProxies   []string            `json:"trusted_proxy_cidrs"`
-	Users            []User              `json:"users"`
-	ClientConfigFile string              `json:"client_config_file"`
-	DataDB           string              `json:"data_db"`
-	TargetPolicy     TargetPolicyConfig  `json:"target_policy"`
-	DataPlane        DataPlaneConfig     `json:"data_plane"`
-	Timeouts         TimeoutConfig       `json:"timeouts"`
-	Limits           LimitConfig         `json:"limits"`
-	Observability    ObservabilityConfig `json:"observability"`
+	AdminAddr        string                 `json:"admin_addr"`
+	ServerAddr       string                 `json:"server_addr"`
+	TrustedProxies   []string               `json:"trusted_proxy_cidrs"`
+	Users            []User                 `json:"users"`
+	ClientConfigFile string                 `json:"client_config_file"`
+	DataDB           string                 `json:"data_db"`
+	TargetPolicy     TargetPolicyConfig     `json:"target_policy"`
+	DataPlane        DataPlaneConfig        `json:"data_plane"`
+	Timeouts         TimeoutConfig          `json:"timeouts"`
+	Limits           LimitConfig            `json:"limits"`
+	Observability    ObservabilityConfig    `json:"observability"`
+	LogConfig        commonlogger.LogConfig `json:"log_config"`
 }
 
 type User struct {
@@ -135,12 +137,20 @@ type TunnelData struct {
 }
 
 type ClientRuntimeConfig struct {
-	Server      string `json:"server"`
-	EnableTLS   bool   `json:"enable_tls"`
-	TLSCAFile   string `json:"tls_ca_file"`
-	Path        string `json:"path"`
-	ClientID    string `json:"client_id"`
-	ClientToken string `json:"client_token"`
+	Server      string                 `json:"server"`
+	EnableTLS   bool                   `json:"enable_tls"`
+	TLSCAFile   string                 `json:"tls_ca_file"`
+	Path        string                 `json:"path"`
+	ClientID    string                 `json:"client_id"`
+	ClientToken string                 `json:"client_token"`
+	LogConfig   commonlogger.LogConfig `json:"log_config"`
+}
+
+func DefaultLogConfig() commonlogger.LogConfig {
+	return commonlogger.LogConfig{
+		Level:   "debug",
+		Console: true,
+	}
 }
 
 func DefaultServerConfig() ServerConfig {
@@ -148,6 +158,7 @@ func DefaultServerConfig() ServerConfig {
 		AdminAddr:      "127.0.0.1:5100",
 		ServerAddr:     "127.0.0.1:6100",
 		TrustedProxies: []string{},
+		LogConfig:      DefaultLogConfig(),
 		DataPlane: DataPlaneConfig{
 			DefaultTransport: "auto",
 			DirectFallback:   true,
@@ -195,6 +206,7 @@ func LoadServer(path string) (ServerConfig, error) {
 	base := filepath.Dir(path)
 	cfg.ClientConfigFile = resolvePath(base, cfg.ClientConfigFile)
 	cfg.DataDB = resolvePath(base, cfg.DataDB)
+	cfg.LogConfig = normalizeLogConfig(base, cfg.LogConfig)
 	if cfg.Observability.GeoIPCountryDatabase != "" {
 		cfg.Observability.GeoIPCountryDatabase = resolvePath(
 			base,
@@ -219,10 +231,11 @@ func LoadClientFile(path string) (ClientFile, error) {
 }
 
 func LoadClient(path string) (ClientRuntimeConfig, error) {
-	var cfg ClientRuntimeConfig
+	cfg := ClientRuntimeConfig{LogConfig: DefaultLogConfig()}
 	if err := decodeStrictFile(path, &cfg); err != nil {
 		return ClientRuntimeConfig{}, err
 	}
+	cfg.LogConfig = normalizeLogConfig(filepath.Dir(path), cfg.LogConfig)
 	if cfg.Path == "" {
 		cfg.Path = "/portpilot"
 	}
@@ -238,6 +251,9 @@ func LoadClient(path string) (ClientRuntimeConfig, error) {
 	}
 	if cfg.TLSCAFile != "" {
 		cfg.TLSCAFile = resolvePath(filepath.Dir(path), cfg.TLSCAFile)
+	}
+	if err := validateLogConfig(cfg.LogConfig); err != nil {
+		return ClientRuntimeConfig{}, fmt.Errorf("validate log_config: %w", err)
 	}
 	return cfg, nil
 }
@@ -273,7 +289,55 @@ func (c ServerConfig) Validate() error {
 	if err := validateLimits(c.Limits); err != nil {
 		return err
 	}
+	if err := validateLogConfig(c.LogConfig); err != nil {
+		return fmt.Errorf("validate log_config: %w", err)
+	}
 	return validateObservability(c.Observability)
+}
+
+func normalizeLogConfig(base string, value commonlogger.LogConfig) commonlogger.LogConfig {
+	if value == (commonlogger.LogConfig{}) {
+		return DefaultLogConfig()
+	}
+	value.Level = strings.ToLower(strings.TrimSpace(value.Level))
+	if value.Level == "" {
+		value.Level = "debug"
+	}
+	value.File = strings.TrimSpace(value.File)
+	if value.File != "" {
+		value.File = resolvePath(base, value.File)
+	}
+	return value
+}
+
+func validateLogConfig(value commonlogger.LogConfig) error {
+	switch value.Level {
+	case "panic", "fatal", "error", "warn", "info", "debug":
+	default:
+		return errors.New("level must be panic, fatal, error, warn, info, or debug")
+	}
+	if value.File == "" {
+		if value.FileSize != 0 || value.FileCount != 0 || value.KeepDays != 0 {
+			return errors.New("file_size, file_count, and keep_days require file")
+		}
+		if !value.Console {
+			return errors.New("at least one of file or console must be enabled")
+		}
+		return nil
+	}
+	if value.FileSize == 0 {
+		return errors.New("file_size must be positive when file is configured")
+	}
+	if value.FileSize > 1<<40 {
+		return errors.New("file_size must not exceed 1 TiB")
+	}
+	if value.FileCount > 10000 {
+		return errors.New("file_count must not exceed 10000")
+	}
+	if value.KeepDays > 36500 {
+		return errors.New("keep_days must not exceed 36500")
+	}
+	return nil
 }
 
 func validateUsers(users []User) error {

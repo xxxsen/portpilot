@@ -2,20 +2,19 @@ package server
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/protocol"
+	"go.uber.org/zap"
 )
 
 func TestUDPFlowLimitQueueBoundAndChannelStickiness(t *testing.T) {
 	t.Parallel()
 	app := &App{
 		Config: config.DefaultServerConfig(),
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger: zap.NewNop(),
 	}
 	app.Config.DataPlane.UDP.MaxFlowsPerProxy = 1
 	app.Config.DataPlane.UDP.ChannelQueueDatagrams = 2

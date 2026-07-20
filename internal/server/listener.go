@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/portpilot/portpilot/internal/config"
+	"go.uber.org/zap"
 )
 
 type ProxyRuntime struct {
@@ -135,7 +136,7 @@ func (m *ListenerManager) serveTCP(handle *ListenerHandle) {
 		conn, err := handle.tcp.Accept()
 		if err != nil {
 			if !handle.closed.Load() {
-				m.app.Logger.Error("proxy TCP accept failed", "error", err)
+				m.app.Logger.Error("proxy TCP accept failed", zap.Error(err))
 			}
 			return
 		}
@@ -156,7 +157,7 @@ func (m *ListenerManager) serveUDP(handle *ListenerHandle) {
 		n, address, err := handle.udp.ReadFromUDP(buffer)
 		if err != nil {
 			if !handle.closed.Load() {
-				m.app.Logger.Error("proxy UDP read failed", "error", err)
+				m.app.Logger.Error("proxy UDP read failed", zap.Error(err))
 			}
 			return
 		}

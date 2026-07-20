@@ -3,10 +3,17 @@ SHELL := /usr/bin/env bash
 
 PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LOCAL_GO := $(PROJECT_ROOT)/.tools/go/bin/go
+ifneq ($(wildcard $(LOCAL_GO)),)
+GO := $(LOCAL_GO)
+else
 GO ?= $(shell command -v go 2>/dev/null)
 ifeq ($(strip $(GO)),)
 GO := $(LOCAL_GO)
 endif
+endif
+unexport GOROOT
+GO_TOOLCHAIN_VERSION := $(shell env -u GOROOT "$(GO)" env GOVERSION 2>/dev/null)
+export GOCACHE := $(PROJECT_ROOT)/.cache/go-build/$(if $(GO_TOOLCHAIN_VERSION),$(GO_TOOLCHAIN_VERSION),unknown)
 export PATH := $(dir $(GO)):$(PATH)
 
 GO_PKGS := ./cmd/... ./internal/... ./migrations/... ./test/integration/... ./test/fixtures/... ./test/acceptance/...
@@ -30,6 +37,7 @@ WEB_IMAGE ?= portpilot-web
 IMAGE_TAG ?= latest
 ACCEPT_SOAK_DURATION ?= 15m
 ACCEPT_CHAOS_INTERVAL ?= 2m
+ACCEPT_DEV_READY_TIMEOUT_SECONDS ?= 180
 ACCEPT_TCP_CONCURRENCY ?= 128
 ACCEPT_TCP_HOLD_DURATION ?= 20s
 ACCEPT_TCP_CYCLES ?= 1000
@@ -175,6 +183,7 @@ ci: lint build test test-race web-test integration-test ## Run the deterministic
 
 acceptance: ## Run full-service merge acceptance against make dev
 	ACCEPT_SOAK_DURATION="$(ACCEPT_SOAK_DURATION)" ACCEPT_CHAOS_INTERVAL="$(ACCEPT_CHAOS_INTERVAL)" \
+		ACCEPT_DEV_READY_TIMEOUT_SECONDS="$(ACCEPT_DEV_READY_TIMEOUT_SECONDS)" \
 		"$(PROJECT_ROOT)/scripts/acceptance.sh"
 
 build-server-image: ## Build portpilot-server; never starts the image

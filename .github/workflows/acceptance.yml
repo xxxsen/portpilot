@@ -1,19 +1,20 @@
 name: acceptance
 
 on:
-  workflow_dispatch:
-  push:
+  pull_request:
     branches: [master]
+    types: [closed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: acceptance-${{ github.ref }}
+  group: acceptance-${{ github.event.pull_request.base.ref }}
   cancel-in-progress: true
 
 jobs:
   acceptance:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -35,6 +36,7 @@ jobs:
         env:
           ACCEPT_SOAK_DURATION: 15m
           ACCEPT_CHAOS_INTERVAL: 2m
+          ACCEPT_DEV_READY_TIMEOUT_SECONDS: 180
         run: make acceptance
       - name: Upload failure artifacts
         if: failure()

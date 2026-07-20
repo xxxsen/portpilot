@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 	_ "modernc.org/sqlite"
 )
 
@@ -24,9 +25,9 @@ type Store struct {
 	analyticsCache   map[analyticsCacheKey]any
 }
 
-func Open(path string, logger *slog.Logger) (*Store, error) {
+func Open(path string, logger *zap.Logger) (*Store, error) {
 	if logger == nil {
-		logger = slog.Default()
+		logger = logutil.GetLogger(context.Background())
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create event database directory: %w", err)

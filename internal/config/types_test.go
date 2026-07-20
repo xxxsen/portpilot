@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	commonlogger "github.com/xxxsen/common/logger"
 )
 
 const testToken = "01234567890123456789012345678901234567890123"
@@ -41,6 +43,72 @@ func TestStrictConfigRejectsUnknownField(t *testing.T) {
 	}
 	if _, err := LoadClient(path); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("unknown field error not returned: %v", err)
+	}
+}
+
+func TestRuntimeLogConfigDefaultsAndRelativePath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	defaultPath := filepath.Join(dir, "client-default.json")
+	defaultData := `{"server":"127.0.0.1:6100","client_id":"a","client_token":"` + testToken + `"}`
+	if err := os.WriteFile(defaultPath, []byte(defaultData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defaultConfig, err := LoadClient(defaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultConfig.LogConfig != DefaultLogConfig() {
+		t.Fatalf("default log_config = %#v", defaultConfig.LogConfig)
+	}
+
+	filePath := filepath.Join(dir, "client-file.json")
+	fileData := `{"server":"127.0.0.1:6100","client_id":"a","client_token":"` + testToken +
+		`","log_config":{"file":"logs/client.log","level":"INFO","file_size":1048576,"file_count":3,"keep_days":7,"console":false}}`
+	if err := os.WriteFile(filePath, []byte(fileData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fileConfig, err := LoadClient(filePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := commonlogger.LogConfig{
+		File: filepath.Join(dir, "logs", "client.log"), Level: "info",
+		FileSize: 1048576, FileCount: 3, KeepDays: 7,
+	}
+	if fileConfig.LogConfig != expected {
+		t.Fatalf("file log_config = %#v, want %#v", fileConfig.LogConfig, expected)
+	}
+}
+
+func TestLogConfigValidation(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		value commonlogger.LogConfig
+	}{
+		{
+			name:  "unsupported level",
+			value: commonlogger.LogConfig{Level: "verbose", Console: true},
+		},
+		{
+			name:  "no output",
+			value: commonlogger.LogConfig{Level: "debug"},
+		},
+		{
+			name:  "file without size",
+			value: commonlogger.LogConfig{File: "portpilot.log", Level: "info"},
+		},
+		{
+			name: "rotation without file",
+			value: commonlogger.LogConfig{
+				Level: "info", Console: true, FileSize: 1048576,
+			},
+		},
+	} {
+		if err := validateLogConfig(test.value); err == nil {
+			t.Fatalf("%s was accepted", test.name)
+		}
 	}
 }
 
