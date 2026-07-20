@@ -376,8 +376,9 @@ make soak-test
 make acceptance
 ```
 
-PR 合并进入 `master` 后执行 `make acceptance`，其中包含 15 分钟 soak；正式版本 tag 仅构建和发布
-`portpilot-server`、`portpilot-client`、`portpilot-web`，不重复执行 soak。
+面向 `master` 的 PR 同时执行 `make ci` 和 `make acceptance`，后者包含 15 分钟 soak；
+正式版本 tag 仅构建和发布 `portpilot-server`、`portpilot-client`、`portpilot-web`，
+不重复执行 soak。
 
 `make smoke-dev` 通过真实 TCP smux、TCP direct 和 UDP-over-TCP 生成不同来源 IP、连接数和
 流量，等待 UDP flow 进入终态后校验维度、两种 Top K 和 IP series。Playwright 在

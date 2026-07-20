@@ -3,18 +3,16 @@ name: acceptance
 on:
   pull_request:
     branches: [master]
-    types: [closed]
 
 permissions:
   contents: read
 
 concurrency:
-  group: acceptance-${{ github.event.pull_request.base.ref }}
+  group: acceptance-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   acceptance:
-    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -32,7 +30,7 @@ jobs:
         run: make web-install
       - name: Install Playwright Chromium
         run: npx --prefix web playwright install --with-deps chromium
-      - name: Run merge acceptance
+      - name: Run PR acceptance
         env:
           ACCEPT_SOAK_DURATION: 15m
           ACCEPT_CHAOS_INTERVAL: 2m

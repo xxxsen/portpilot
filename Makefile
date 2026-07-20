@@ -136,8 +136,14 @@ migration-check: ## Validate embedded migrations, naming, and DDL ownership
 	@invalid="$$(find migrations -maxdepth 1 -type f -name "*.sql" -printf "%f\n" | grep -Ev '^[0-9]{4}_[a-z0-9_]+\.sql$$' || true)"; \
 		test -z "$${invalid}" || { printf "Invalid migration filename(s):\n%s\n" "$${invalid}" >&2; exit 1; }
 	"$(GO)" test ./migrations/... ./internal/store -run 'Migration|DDL|Schema'
-	@matches="$$(rg -n 'CREATE[[:space:]]+(TABLE|INDEX|VIEW|TRIGGER)|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE' \
-		cmd internal --glob '*.go' --glob '!*_test.go' | grep -v 'schema_migrations' || true)"; \
+	@set +e; \
+		matches="$$(grep -RInE --include="*.go" --exclude="*_test.go" \
+			'CREATE[[:space:]]+(TABLE|INDEX|VIEW|TRIGGER)|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE' \
+			cmd internal 2>&1)"; \
+		status=$$?; \
+		set -e; \
+		if ((status > 1)); then printf "%s\n" "$${matches}" >&2; exit "$${status}"; fi; \
+		matches="$$(printf "%s\n" "$${matches}" | awk '!/schema_migrations/')"; \
 		test -z "$${matches}" || { printf "Business DDL must live in migrations/:\n%s\n" "$${matches}" >&2; exit 1; }
 
 dockerfile-lint: ## Statically validate Dockerfiles without running containers
@@ -145,8 +151,12 @@ dockerfile-lint: ## Statically validate Dockerfiles without running containers
 
 web-lint: web-install ## Run Web ESLint with zero warnings
 	npm --prefix "$(PROJECT_ROOT)/web" run lint
-	@matches="$$(rg -n 'window\.(prompt|confirm|alert)[[:space:]]*\(' web \
-		--glob '!node_modules/**' --glob '!.next/**' --glob '!playwright-report/**' || true)"; \
+	@set +e; \
+		matches="$$(grep -RInE --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=playwright-report \
+			'window\.(prompt|confirm|alert)[[:space:]]*\(' web 2>&1)"; \
+		status=$$?; \
+		set -e; \
+		if ((status > 1)); then printf "%s\n" "$${matches}" >&2; exit "$${status}"; fi; \
 		test -z "$${matches}" || { printf "Native browser dialogs are forbidden:\n%s\n" "$${matches}" >&2; exit 1; }
 
 web-typecheck: web-install ## Run strict TypeScript checks

@@ -78,16 +78,15 @@ make fault-test
 make ci
 ```
 
-面向 `master` 的 Pull Request 成功合并后，合并验收会自行启动和清理 `make dev`，执行
-smoke、Web E2E、故障注入和 15 分钟 chaos soak：
+面向 `master` 的 Pull Request 创建或更新时，CI 和 acceptance 会并行运行。acceptance
+会自行启动和清理 `make dev`，执行 smoke、Web E2E、故障注入和 15 分钟 chaos soak：
 
 ```bash
 make acceptance
 ```
 
-`make acceptance` 不重复执行 `make ci`，也不构建镜像。Pull Request 和 `master` push 的
-确定性门禁使用 `make ci`；只有 PR 合并进入 `master` 才自动执行 acceptance。正式版本 tag
-只构建并发布三个镜像，不重复执行 soak。
+`make acceptance` 不重复执行 `make ci`，也不构建镜像。PR 同时执行两项独立门禁；直接
+push `master` 只执行 `make ci`。正式版本 tag 只构建并发布三个镜像，不重复执行 soak。
 
 单元测试不设置覆盖率百分比阈值，但安全、协议和生命周期路径必须有测试。
 
