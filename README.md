@@ -27,6 +27,9 @@ make dev
 
 `make dev` 构建并启动正式的 `cmd/portpilot-server` 和 `cmd/portpilot-client`，同时启动 Next.js 和仅作为代理目标的 TCP/UDP echo fixture。客户端通过 `configs/dev/client.json` 以非 TLS 方式直连本地服务端。
 
+Makefile 和开发测试脚本优先使用 `.tools/go`，忽略外部 `GOROOT`，并按 `GOVERSION` 将编译
+缓存隔离在 `.cache/go-build/`；仓库工具链不存在时才回退到系统 Go。
+
 默认入口：
 
 - Web：`http://127.0.0.1:3000`
@@ -46,6 +49,10 @@ make dev
 - Nginx 边界：参考 `docker/nginx/default.conf`
 
 所有 JSON 使用严格解析，未知字段会导致启动失败。管理员密码必须是 bcrypt 哈希且 cost 不低于 10；客户端 token 应由至少 32 字节随机数据生成。生产配置应限制为服务账号可读，并配置目标 CIDR/端口策略。
+
+服务端和客户端都支持相同的 `log_config`。省略时默认以 `debug` 级别输出到 console；生产
+环境可配置 `level`、`console`、`file`、`file_size`、`file_count` 和 `keep_days`。文件相对
+路径以对应配置文件所在目录为基准，完整约束见设计文档的“日志与指标”一节。
 
 生成管理员密码哈希：
 
@@ -71,15 +78,15 @@ make fault-test
 make ci
 ```
 
-主分支 `master` 合并验收会自行启动和清理 `make dev`，执行 smoke、Web E2E、故障注入和 15 分钟
-chaos soak：
+面向 `master` 的 Pull Request 创建或更新时，CI 和 acceptance 会并行运行。acceptance
+会自行启动和清理 `make dev`，执行 smoke、Web E2E、故障注入和 15 分钟 chaos soak：
 
 ```bash
 make acceptance
 ```
 
-`make acceptance` 不重复执行 `make ci`，也不构建镜像。Pull Request 和 `master` 的确定性门禁使用
-`make ci`；正式版本 tag 只构建并发布三个镜像，不重复执行 soak。
+`make acceptance` 不重复执行 `make ci`，也不构建镜像。PR 同时执行两项独立门禁；直接
+push `master` 只执行 `make ci`。正式版本 tag 只构建并发布三个镜像，不重复执行 soak。
 
 单元测试不设置覆盖率百分比阈值，但安全、协议和生命周期路径必须有测试。
 

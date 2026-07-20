@@ -11,6 +11,7 @@ import (
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/transport"
 	"github.com/xtaci/smux"
+	"go.uber.org/zap"
 )
 
 type clientMux struct {
@@ -45,7 +46,7 @@ func (p *MuxPool) Open(parent context.Context, request protocol.CreateMux) {
 		15*time.Second,
 	)
 	if err != nil {
-		p.control.app.Logger.Warn("mux upgrade failed", "error", err)
+		p.control.app.Logger.Warn("mux upgrade failed", zap.Error(err))
 		return
 	}
 	handshake := protocol.MuxAuth{
@@ -79,7 +80,7 @@ func (p *MuxPool) Open(parent context.Context, request protocol.CreateMux) {
 	p.mu.Unlock()
 	ready, _ := protocol.NewMessage(protocol.TypeMuxReady, protocol.MuxReady{MuxID: mux.id})
 	_ = p.control.send(ready)
-	p.control.app.Logger.Info("smux session ready", "mux_id", mux.id)
+	p.control.app.Logger.Info("smux session ready", zap.String("mux_id", mux.id))
 	go func() {
 		<-session.CloseChan()
 		p.mu.Lock()

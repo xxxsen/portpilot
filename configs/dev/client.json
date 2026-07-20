@@ -4,5 +4,9 @@
   "tls_ca_file": "",
   "path": "/portpilot",
   "client_id": "dev-client",
-  "client_token": "cG9ydHBpbG90LWRldi10b2tlbi0wMTIzNDU2Nzg5YWJjZGVm"
+  "client_token": "cG9ydHBpbG90LWRldi10b2tlbi0wMTIzNDU2Nzg5YWJjZGVm",
+  "log_config": {
+    "level": "debug",
+    "console": true
+  }
 }

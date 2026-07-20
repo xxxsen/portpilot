@@ -1,8 +1,6 @@
 package server
 
 import (
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +10,7 @@ import (
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 func TestDataHandshakeLimiterRejectsExcessRequests(t *testing.T) {
@@ -35,7 +34,7 @@ func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
 	t.Parallel()
 	events, err := store.Open(
 		filepath.Join(t.TempDir(), "events.db"),
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		zap.NewNop(),
 	)
 	if err != nil {
 		t.Fatal(err)

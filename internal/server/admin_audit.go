@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 var adminSessionTTLs = map[string]time.Duration{
@@ -65,7 +66,11 @@ func (a *App) writeAuditBestEffort(ctx context.Context, event store.AuditEvent) 
 	}
 	if _, err := a.Events.WriteAudit(ctx, event); err != nil {
 		a.storeError.Store(true)
-		a.Logger.Error("write audit event failed", "event_type", event.EventType, "error", err)
+		a.Logger.Error(
+			"write audit event failed",
+			zap.String("event_type", event.EventType),
+			zap.Error(err),
+		)
 		return
 	}
 	a.storeError.Store(false)

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/portpilot/portpilot/internal/protocol"
+	"go.uber.org/zap"
 )
 
 func (s *Session) ReserveMux(id string) bool {
@@ -60,7 +61,11 @@ func (a *App) ensureMux(session *Session, desired int) {
 			return
 		}
 		if err := a.requestMux(session); err != nil {
-			a.Logger.Warn("cannot request smux session", "client_id", session.ClientID, "error", err)
+			a.Logger.Warn(
+				"cannot request smux session",
+				zap.String("client_id", session.ClientID),
+				zap.Error(err),
+			)
 			return
 		}
 	}

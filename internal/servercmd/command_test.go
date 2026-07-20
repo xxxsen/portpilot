@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/portpilot/portpilot/internal/cli"
+	"github.com/spf13/cobra"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -72,5 +73,21 @@ func TestRootRequiresSubcommand(t *testing.T) {
 	err := command.Execute()
 	if err == nil || !cli.IsUsageError(err) {
 		t.Fatalf("root command error = %v, want usage error", err)
+	}
+}
+
+func TestRunCommandsDoNotExposeDebugFlag(t *testing.T) {
+	t.Parallel()
+	for name, root := range map[string]*cobra.Command{
+		"server": NewCommand(),
+		"client": cli.NewClientCommand(),
+	} {
+		run, _, err := root.Find([]string{"run"})
+		if err != nil {
+			t.Fatalf("%s run command: %v", name, err)
+		}
+		if run.Flags().Lookup("debug") != nil {
+			t.Fatalf("%s run command exposes --debug", name)
+		}
 	}
 }

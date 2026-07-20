@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+unset GOROOT
 DATA_DIR="${PORTPILOT_DEV_DATA_DIR:-${ROOT}/.dev-data}"
 LOG_DIR="${DATA_DIR}/logs"
 CONFIG_DIR="${DATA_DIR}/config"
@@ -12,15 +13,17 @@ WEB_URL="${PORTPILOT_DEV_WEB_URL:-http://127.0.0.1:3000}"
 GO_BIN="${GO:-}"
 
 if [[ -z "${GO_BIN}" ]]; then
-  if command -v go >/dev/null 2>&1; then
-    GO_BIN="$(command -v go)"
-  elif [[ -x "${ROOT}/.tools/go/bin/go" ]]; then
+  if [[ -x "${ROOT}/.tools/go/bin/go" ]]; then
     GO_BIN="${ROOT}/.tools/go/bin/go"
+  elif command -v go >/dev/null 2>&1; then
+    GO_BIN="$(command -v go)"
   else
     echo "Go is required. Install Go or place it at .tools/go/bin/go." >&2
     exit 1
   fi
 fi
+GO_TOOLCHAIN_VERSION="$("${GO_BIN}" env GOVERSION)"
+export GOCACHE="${ROOT}/.cache/go-build/${GO_TOOLCHAIN_VERSION}"
 
 mkdir -p "${LOG_DIR}" "${CONFIG_DIR}"
 if [[ -z "${PORTPILOT_DEV_SERVER_CONFIG:-}" ]]; then
@@ -135,10 +138,10 @@ if [[ "${PORTPILOT_DEV_ECHO:-1}" == "1" ]]; then
   "${GO_BIN}" build -o "${DEV_BIN_DIR}/echo" "${ROOT}/test/fixtures/echo"
   start_process "echo" "${LOG_DIR}/echo.log" "${DEV_BIN_DIR}/echo"
 fi
-start_process "server" "${LOG_DIR}/server.log" "${DEV_BIN_DIR}/portpilot-server" run --config "${SERVER_CONFIG}" --debug
+start_process "server" "${LOG_DIR}/server.log" "${DEV_BIN_DIR}/portpilot-server" run --config "${SERVER_CONFIG}"
 wait_http "PortPilot server" "${ADMIN_URL}/health/ready"
 
-start_process "client" "${LOG_DIR}/client.log" "${DEV_BIN_DIR}/portpilot-client" run --config "${CLIENT_CONFIG}" --debug
+start_process "client" "${LOG_DIR}/client.log" "${DEV_BIN_DIR}/portpilot-client" run --config "${CLIENT_CONFIG}"
 wait_client_active
 
 start_process "web" "${LOG_DIR}/web.log" env PORTPILOT_ADMIN_API="${ADMIN_URL}" npm --prefix "${ROOT}/web" run dev

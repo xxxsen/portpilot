@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	"github.com/portpilot/portpilot/migrations"
+	"go.uber.org/zap"
 	"modernc.org/sqlite"
 )
 
@@ -59,7 +59,7 @@ func migrationFilesystem() fs.FS {
 	return migrationsFS
 }
 
-func migrate(ctx context.Context, db *sql.DB, path string, logger *slog.Logger) error {
+func migrate(ctx context.Context, db *sql.DB, path string, logger *zap.Logger) error {
 	files, err := listMigrationFiles(migrationFilesystem())
 	if err != nil {
 		return err
@@ -115,7 +115,11 @@ func migrate(ctx context.Context, db *sql.DB, path string, logger *slog.Logger) 
 		if err := applyMigration(ctx, db, file); err != nil {
 			return err
 		}
-		logger.Info("applied database migration", "version", file.version, "filename", file.filename)
+		logger.Info(
+			"applied database migration",
+			zap.Int("version", file.version),
+			zap.String("filename", file.filename),
+		)
 	}
 	return validateMigratedSchema(ctx, db, files, path)
 }
@@ -330,7 +334,7 @@ func normalizeSchemaSQL(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
-func prepareLegacyDatabase(ctx context.Context, path string, logger *slog.Logger) (string, error) {
+func prepareLegacyDatabase(ctx context.Context, path string, logger *zap.Logger) (string, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && info.Size() == 0) {
 		return "", nil
@@ -382,7 +386,7 @@ func prepareLegacyDatabase(ctx context.Context, path string, logger *slog.Logger
 	return backupPath, nil
 }
 
-func backupDatabase(ctx context.Context, db *sql.DB, path, reason string, logger *slog.Logger) (string, error) {
+func backupDatabase(ctx context.Context, db *sql.DB, path, reason string, logger *zap.Logger) (string, error) {
 	if path == ":memory:" {
 		return "", nil
 	}
@@ -452,7 +456,11 @@ func backupDatabase(ctx context.Context, db *sql.DB, path, reason string, logger
 		return "", fmt.Errorf("set database backup permissions: %w", err)
 	}
 	success = true
-	logger.Info("created database backup", "reason", reason, "file", filepath.Base(backupPath))
+	logger.Info(
+		"created database backup",
+		zap.String("reason", reason),
+		zap.String("file", filepath.Base(backupPath)),
+	)
 	if err := pruneBackups(dir, base); err != nil {
 		return "", err
 	}

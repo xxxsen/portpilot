@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"runtime"
 	"sort"
 	"strings"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 )
 
 var ErrLimitReached = errors.New("network activity limit reached")
@@ -109,7 +110,7 @@ type writeCommand struct {
 type Service struct {
 	store  *store.Store
 	config Config
-	logger *slog.Logger
+	logger *zap.Logger
 
 	mu                      sync.RWMutex
 	active                  map[string]*Handle
@@ -135,7 +136,7 @@ type Service struct {
 	sampleOverflow          atomic.Uint64
 }
 
-func New(database *store.Store, config Config, logger *slog.Logger) (*Service, error) {
+func New(database *store.Store, config Config, logger *zap.Logger) (*Service, error) {
 	if database == nil {
 		return nil, errors.New("activity database is required")
 	}
@@ -146,7 +147,7 @@ func New(database *store.Store, config Config, logger *slog.Logger) (*Service, e
 		return nil, errors.New("invalid activity service configuration")
 	}
 	if logger == nil {
-		logger = slog.Default()
+		logger = logutil.GetLogger(context.Background())
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
@@ -336,7 +337,7 @@ func (h *Handle) finish(state, reasonCode, reason string) {
 		if result.SampleOverflow {
 			h.service.logger.Warn(
 				"network analytics samples exceeded terminal counters",
-				"activity_id", connection.ActivityID,
+				zap.String("activity_id", connection.ActivityID),
 			)
 		}
 		return nil
@@ -683,7 +684,7 @@ func (s *Service) backfill() {
 				return
 			}
 			s.backfillDegraded.Store(true)
-			s.logger.Error("network analytics backfill failed", "error", err)
+			s.logger.Error("network analytics backfill failed", zap.Error(err))
 		} else {
 			s.backfillDegraded.Store(false)
 		}
@@ -864,10 +865,16 @@ func (s *Service) enqueueHighCommand(command writeCommand) {
 		select {
 		case s.overflow <- command:
 			s.degraded.Store(true)
-			s.logger.Warn("activity high-priority overflow queue used", "operation", command.name)
+			s.logger.Warn(
+				"activity high-priority overflow queue used",
+				zap.String("operation", command.name),
+			)
 		default:
 			s.degraded.Store(true)
-			s.logger.Error("activity high-priority queues full", "operation", command.name)
+			s.logger.Error(
+				"activity high-priority queues full",
+				zap.String("operation", command.name),
+			)
 		}
 	}
 }
@@ -877,7 +884,7 @@ func (s *Service) enqueueLowCommand(command writeCommand) {
 	case s.low <- command:
 	default:
 		s.degraded.Store(true)
-		s.logger.Warn("activity sample queue full", "operation", command.name)
+		s.logger.Warn("activity sample queue full", zap.String("operation", command.name))
 	}
 }
 
@@ -895,7 +902,12 @@ func (s *Service) writer() {
 			}
 			if attempt == attempts {
 				s.degraded.Store(true)
-				s.logger.Error("activity persistence failed", "operation", command.name, "attempts", attempts, "error", err)
+				s.logger.Error(
+					"activity persistence failed",
+					zap.String("operation", command.name),
+					zap.Int("attempts", attempts),
+					zap.Error(err),
+				)
 				return
 			}
 			time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/portpilot/portpilot/internal/protocol"
+	"go.uber.org/zap"
 )
 
 type clientUDPChannel struct {
@@ -53,7 +54,7 @@ func (c *clientUDPChannel) Run() {
 		frame, err := protocol.ReadUDPFrame(c.conn, c.params.MaxDatagramSize)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !c.closed.Load() {
-				c.session.app.Logger.Warn("UDP channel read failed", "error", err)
+				c.session.app.Logger.Warn("UDP channel read failed", zap.Error(err))
 			}
 			return
 		}
@@ -110,7 +111,10 @@ func (c *clientUDPChannel) readResponses(flow *clientUDPFlow) {
 		select {
 		case c.send <- frame:
 		default:
-			c.session.app.Logger.Warn("UDP client channel queue full", "proxy_id", c.request.ProxyID)
+			c.session.app.Logger.Warn(
+				"UDP client channel queue full",
+				zap.String("proxy_id", c.request.ProxyID),
+			)
 		}
 	}
 }

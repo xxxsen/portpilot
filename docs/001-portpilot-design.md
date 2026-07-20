@@ -93,9 +93,9 @@ PortPilot 使用三类配置：
 
 | 配置 | 所有者 | 内容 |
 | --- | --- | --- |
-| 服务端主配置 | 服务端 | 管理/数据监听地址、管理员、代理配置路径、SQLite 路径、数据面参数、超时和限额 |
+| 服务端主配置 | 服务端 | 管理/数据监听地址、管理员、代理配置路径、SQLite 路径、数据面参数、超时、限额和日志 |
 | 客户端与代理配置 | 服务端 | 客户端 ID、token、启停状态和代理规则 |
-| 客户端运行配置 | 客户端 | 服务端地址、TLS、外部路径、客户端 ID 和 token |
+| 客户端运行配置 | 客户端 | 服务端地址、TLS、外部路径、客户端 ID、token 和日志 |
 
 客户端与代理配置文件是代理运行状态的事实来源。删除 SQLite 后，服务端仍必须能从配置文件恢复 listener 并等待客户端重连。
 
@@ -117,6 +117,7 @@ PortPilot 使用三类配置：
 | `data_plane` | transport、smux pool 和 UDP 参数 |
 | `timeouts` | 握手、心跳、建链、空闲和最长生命周期 |
 | `limits` | pending、tunnel、session、flow、消息和速率上限 |
+| `log_config` | 服务端日志级别、console/file 输出和文件轮转参数 |
 
 `data_plane.smux` 由服务端权威配置，并在客户端鉴权成功后下发。客户端不能通过本地配置放宽 stream、buffer、keepalive、drain 或 session 上限。
 
@@ -193,7 +194,11 @@ PortPilot 使用三类配置：
   "tls_ca_file": "",
   "path": "/portpilot",
   "client_id": "office-a",
-  "client_token": "<random-secret>"
+  "client_token": "<random-secret>",
+  "log_config": {
+    "level": "info",
+    "console": true
+  }
 }
 ```
 
@@ -203,6 +208,7 @@ PortPilot 使用三类配置：
 - 禁用 TLS 只适用于本机开发或受保护专网，并应产生明确告警。
 - `path` 可以降低无意探测，但不是安全边界。
 - 客户端本地不保存 proxy、smux 或 UDP 参数。
+- `log_config` 与服务端使用相同结构；客户端和服务端独立初始化、独立输出。
 
 ## 4. 身份与鉴权
 
@@ -653,6 +659,25 @@ SQLite 不能保存：
 
 ### 11.2 日志与指标
 
+客户端和服务端使用 `github.com/xxxsen/common/logger` 初始化日志，并通过
+`logutil.GetLogger(ctx)` 获取携带上下文的 Zap logger。两端配置结构一致：
+
+| 字段 | 语义 |
+| --- | --- |
+| `level` | `panic`、`fatal`、`error`、`warn`、`info` 或 `debug` |
+| `console` | 是否输出到标准错误 |
+| `file` | 可选日志文件；相对路径以当前进程的配置文件目录为基准 |
+| `file_size` | 单个日志文件的轮转阈值，单位为字节；启用 `file` 时必须大于 0 |
+| `file_count` | 最多保留的轮转文件数，`0` 表示不按数量清理 |
+| `keep_days` | 最多保留天数，`0` 表示不按时间清理 |
+
+省略整个 `log_config` 时，默认使用 `debug` 级别并输出到 console。配置存在时至少启用
+console 或 file 之一；日志文件的父目录由进程创建。客户端和服务端不应配置为写入同一个
+文件。`level` 为空时统一规范化为 `debug`，命令行不提供独立的日志级别覆盖参数。
+
+生产环境建议使用 `info` 或更高级别，并由进程日志采集器接管 console；需要本地文件时再
+显式配置轮转。业务日志使用稳定消息和结构化字段，不通过字符串拼接承载上下文。
+
 结构化日志可以包含：
 
 - request、connection、client 和 proxy 标识。
@@ -734,7 +759,7 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 | `make fault-test` | session、ticket、frame、目标和资源故障 |
 | `make soak-test` | 并发、控制轮换、数据完整性和资源回收 |
 | `make ci` | 确定性构建、lint、unit、race、Web 和 integration 汇总 |
-| `make acceptance` | `master` 合并时的正式进程完整验收和 15 分钟 soak |
+| `make acceptance` | 面向 `master` 的 PR 创建或更新时执行完整验收和 15 分钟 soak |
 
 没有单元测试覆盖率百分比阈值，但安全、协议和生命周期路径必须具备正常、错误和边界测试。
 
@@ -747,8 +772,9 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 - `portpilot-web`
 
 Makefile 不提供 Docker/Compose 运行、容器 smoke 或容器测试目标。镜像只验证发布制品可以构建；
-所有功能正确性由 `make dev` 启动的正式进程验证。`master` 合并提交执行 `make acceptance`，
-正式版本 tag 只构建并发布三张镜像，不重复执行 soak。
+所有功能正确性由 `make dev` 启动的正式进程验证。面向 `master` 的 PR 创建或更新时，
+`make ci` 与 `make acceptance` 作为两项独立门禁并行执行；直接 push `master` 只执行
+确定性 CI。正式版本 tag 只构建并发布三张镜像，不重复执行 soak。
 
 ## 15. 设计决策摘要
 

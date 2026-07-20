@@ -12,6 +12,10 @@
   ],
   "client_config_file": "./clients.json",
   "data_db": "../../.dev-data/portpilot.db",
+  "log_config": {
+    "level": "debug",
+    "console": true
+  },
   "data_plane": {
     "default_transport": "auto",
     "direct_fallback": true,

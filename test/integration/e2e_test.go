@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -17,6 +16,7 @@ import (
 	portpilotclient "github.com/portpilot/portpilot/internal/client"
 	"github.com/portpilot/portpilot/internal/config"
 	portpilotserver "github.com/portpilot/portpilot/internal/server"
+	"go.uber.org/zap"
 )
 
 const (
@@ -26,7 +26,7 @@ const (
 
 func TestEndToEndTCPDirectUDPAndReconnect(t *testing.T) {
 	t.Parallel()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := zap.NewNop()
 	dir := t.TempDir()
 	tcpEcho, closeTCPEcho := startTCPEcho(t)
 	defer closeTCPEcho()
@@ -129,7 +129,7 @@ func TestEndToEndTCPDirectUDPAndReconnect(t *testing.T) {
 	waitDone(t, secondDone, "second client")
 }
 
-func startClient(t *testing.T, path string, logger *slog.Logger) (context.CancelFunc, <-chan error) {
+func startClient(t *testing.T, path string, logger *zap.Logger) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	app, err := portpilotclient.New(path, logger)
 	if err != nil {

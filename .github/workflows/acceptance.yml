@@ -1,15 +1,14 @@
 name: acceptance
 
 on:
-  workflow_dispatch:
-  push:
+  pull_request:
     branches: [master]
 
 permissions:
   contents: read
 
 concurrency:
-  group: acceptance-${{ github.ref }}
+  group: acceptance-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -31,10 +30,11 @@ jobs:
         run: make web-install
       - name: Install Playwright Chromium
         run: npx --prefix web playwright install --with-deps chromium
-      - name: Run merge acceptance
+      - name: Run PR acceptance
         env:
           ACCEPT_SOAK_DURATION: 15m
           ACCEPT_CHAOS_INTERVAL: 2m
+          ACCEPT_DEV_READY_TIMEOUT_SECONDS: 180
         run: make acceptance
       - name: Upload failure artifacts
         if: failure()

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"io/fs"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +12,7 @@ import (
 	"testing/fstest"
 
 	schemamigrations "github.com/portpilot/portpilot/migrations"
+	"go.uber.org/zap"
 )
 
 func TestEmbeddedMigrationsAreNamedAndDDLOnly(t *testing.T) {
@@ -49,7 +49,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 		"0001_init.sql": &fstest.MapFile{Data: base},
 	})
 	path := filepath.Join(t.TempDir(), "store.db")
-	first, err := Open(path, slog.Default())
+	first, err := Open(path, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 		"0001_init.sql":     &fstest.MapFile{Data: base},
 		"0002_add_beta.sql": &fstest.MapFile{Data: second},
 	})
-	upgraded, err := Open(path, slog.Default())
+	upgraded, err := Open(path, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 		"0001_init.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE alpha (id TEXT PRIMARY KEY);`)},
 		"0002_add_beta.sql": &fstest.MapFile{Data: second},
 	})
-	if store, err := Open(path, slog.Default()); !errors.Is(err, errMigrationChanged) || store != nil {
+	if store, err := Open(path, zap.NewNop()); !errors.Is(err, errMigrationChanged) || store != nil {
 		t.Fatalf("changed migration error=%v store=%v", err, store)
 	}
 
@@ -98,7 +98,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := Open(path, slog.Default()); !errors.Is(err, errSchemaDrift) || store != nil {
+	if store, err := Open(path, zap.NewNop()); !errors.Is(err, errSchemaDrift) || store != nil {
 		t.Fatalf("schema drift error=%v store=%v", err, store)
 	}
 
@@ -108,7 +108,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 			`CREATE TABLE first_table (id INTEGER); CREATE TABLE first_table (id INTEGER);`,
 		)},
 	})
-	if store, err := Open(rollbackPath, slog.Default()); err == nil || store != nil {
+	if store, err := Open(rollbackPath, zap.NewNop()); err == nil || store != nil {
 		t.Fatalf("broken migration opened store=%v err=%v", store, err)
 	}
 	rollbackDB, err := sql.Open("sqlite", rollbackPath)
@@ -138,7 +138,7 @@ func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
 		"0001_init.sql": &fstest.MapFile{Data: initial},
 	})
 	path := filepath.Join(t.TempDir(), "store.db")
-	oldStore, err := Open(path, slog.Default())
+	oldStore, err := Open(path, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
 	}
 
 	SetMigrations(schemamigrations.FS)
-	upgraded, err := Open(path, slog.Default())
+	upgraded, err := Open(path, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestLegacyDatabaseIsBackedUpAndRebuilt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store, err := Open(path, slog.Default())
+	store, err := Open(path, zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestValidateMigrationDDLRejectsDML(t *testing.T) {
 }
 
 func TestDatabaseIntegrityChecksForeignKeys(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "store.db"), slog.Default())
+	store, err := Open(filepath.Join(t.TempDir(), "store.db"), zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}

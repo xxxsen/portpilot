@@ -3,7 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG="${ROOT}/.dev-data/logs/acceptance-dev.log"
+READY_TIMEOUT_SECONDS="${ACCEPT_DEV_READY_TIMEOUT_SECONDS:-180}"
 mkdir -p "$(dirname "${LOG}")"
+
+if [[ ! "${READY_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ACCEPT_DEV_READY_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 
 cleanup() {
   local status=$?
@@ -20,7 +26,8 @@ trap cleanup EXIT INT TERM
 setsid make -C "${ROOT}" dev >"${LOG}" 2>&1 &
 DEV_PID=$!
 ready=0
-for ((i = 1; i <= 300; i++)); do
+deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+while ((SECONDS < deadline)); do
   if curl -fsS http://127.0.0.1:3000 >/dev/null 2>&1 && grep -q "PortPilot dev environment is ready" "${LOG}"; then
     ready=1
     break
@@ -29,10 +36,10 @@ for ((i = 1; i <= 300; i++)); do
     cat "${LOG}" >&2
     exit 1
   fi
-  sleep 0.1
+  sleep 0.25
 done
 if [[ "${ready}" -ne 1 ]]; then
-  echo "make dev did not become ready before the acceptance timeout" >&2
+  echo "make dev did not become ready within ${READY_TIMEOUT_SECONDS}s" >&2
   cat "${LOG}" >&2
   exit 1
 fi

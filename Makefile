@@ -3,10 +3,17 @@ SHELL := /usr/bin/env bash
 
 PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 LOCAL_GO := $(PROJECT_ROOT)/.tools/go/bin/go
+ifneq ($(wildcard $(LOCAL_GO)),)
+GO := $(LOCAL_GO)
+else
 GO ?= $(shell command -v go 2>/dev/null)
 ifeq ($(strip $(GO)),)
 GO := $(LOCAL_GO)
 endif
+endif
+unexport GOROOT
+GO_TOOLCHAIN_VERSION := $(shell env -u GOROOT "$(GO)" env GOVERSION 2>/dev/null)
+export GOCACHE := $(PROJECT_ROOT)/.cache/go-build/$(if $(GO_TOOLCHAIN_VERSION),$(GO_TOOLCHAIN_VERSION),unknown)
 export PATH := $(dir $(GO)):$(PATH)
 
 GO_PKGS := ./cmd/... ./internal/... ./migrations/... ./test/integration/... ./test/fixtures/... ./test/acceptance/...
@@ -30,6 +37,7 @@ WEB_IMAGE ?= portpilot-web
 IMAGE_TAG ?= latest
 ACCEPT_SOAK_DURATION ?= 15m
 ACCEPT_CHAOS_INTERVAL ?= 2m
+ACCEPT_DEV_READY_TIMEOUT_SECONDS ?= 180
 ACCEPT_TCP_CONCURRENCY ?= 128
 ACCEPT_TCP_HOLD_DURATION ?= 20s
 ACCEPT_TCP_CYCLES ?= 1000
@@ -128,8 +136,14 @@ migration-check: ## Validate embedded migrations, naming, and DDL ownership
 	@invalid="$$(find migrations -maxdepth 1 -type f -name "*.sql" -printf "%f\n" | grep -Ev '^[0-9]{4}_[a-z0-9_]+\.sql$$' || true)"; \
 		test -z "$${invalid}" || { printf "Invalid migration filename(s):\n%s\n" "$${invalid}" >&2; exit 1; }
 	"$(GO)" test ./migrations/... ./internal/store -run 'Migration|DDL|Schema'
-	@matches="$$(rg -n 'CREATE[[:space:]]+(TABLE|INDEX|VIEW|TRIGGER)|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE' \
-		cmd internal --glob '*.go' --glob '!*_test.go' | grep -v 'schema_migrations' || true)"; \
+	@set +e; \
+		matches="$$(grep -RInE --include="*.go" --exclude="*_test.go" \
+			'CREATE[[:space:]]+(TABLE|INDEX|VIEW|TRIGGER)|ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE' \
+			cmd internal 2>&1)"; \
+		status=$$?; \
+		set -e; \
+		if ((status > 1)); then printf "%s\n" "$${matches}" >&2; exit "$${status}"; fi; \
+		matches="$$(printf "%s\n" "$${matches}" | awk '!/schema_migrations/')"; \
 		test -z "$${matches}" || { printf "Business DDL must live in migrations/:\n%s\n" "$${matches}" >&2; exit 1; }
 
 dockerfile-lint: ## Statically validate Dockerfiles without running containers
@@ -137,8 +151,12 @@ dockerfile-lint: ## Statically validate Dockerfiles without running containers
 
 web-lint: web-install ## Run Web ESLint with zero warnings
 	npm --prefix "$(PROJECT_ROOT)/web" run lint
-	@matches="$$(rg -n 'window\.(prompt|confirm|alert)[[:space:]]*\(' web \
-		--glob '!node_modules/**' --glob '!.next/**' --glob '!playwright-report/**' || true)"; \
+	@set +e; \
+		matches="$$(grep -RInE --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=playwright-report \
+			'window\.(prompt|confirm|alert)[[:space:]]*\(' web 2>&1)"; \
+		status=$$?; \
+		set -e; \
+		if ((status > 1)); then printf "%s\n" "$${matches}" >&2; exit "$${status}"; fi; \
 		test -z "$${matches}" || { printf "Native browser dialogs are forbidden:\n%s\n" "$${matches}" >&2; exit 1; }
 
 web-typecheck: web-install ## Run strict TypeScript checks
@@ -175,6 +193,7 @@ ci: lint build test test-race web-test integration-test ## Run the deterministic
 
 acceptance: ## Run full-service merge acceptance against make dev
 	ACCEPT_SOAK_DURATION="$(ACCEPT_SOAK_DURATION)" ACCEPT_CHAOS_INTERVAL="$(ACCEPT_CHAOS_INTERVAL)" \
+		ACCEPT_DEV_READY_TIMEOUT_SECONDS="$(ACCEPT_DEV_READY_TIMEOUT_SECONDS)" \
 		"$(PROJECT_ROOT)/scripts/acceptance.sh"
 
 build-server-image: ## Build portpilot-server; never starts the image

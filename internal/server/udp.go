@@ -15,6 +15,7 @@ import (
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 type UDPChannel struct {
@@ -213,7 +214,11 @@ func (m *UDPManager) RunChannel(channel *UDPChannel) {
 		frame, err := protocol.ReadUDPFrame(channel.Conn, max)
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !channel.closed.Load() {
-				m.app.Logger.Warn("UDP channel read failed", "proxy_id", channel.ProxyID, "error", err)
+				m.app.Logger.Warn(
+					"UDP channel read failed",
+					zap.String("proxy_id", channel.ProxyID),
+					zap.Error(err),
+				)
 			}
 			return
 		}

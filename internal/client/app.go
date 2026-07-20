@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -22,11 +21,13 @@ import (
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/relay"
 	"github.com/portpilot/portpilot/internal/transport"
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 )
 
 type App struct {
 	Config config.ClientRuntimeConfig
-	Logger *slog.Logger
+	Logger *zap.Logger
 	active atomic.Pointer[controlSession]
 	authAt atomic.Int64
 }
@@ -52,10 +53,17 @@ type controlSession struct {
 	tcpMaxLife time.Duration
 }
 
-func New(configPath string, logger *slog.Logger) (*App, error) {
+func New(configPath string, logger *zap.Logger) (*App, error) {
 	cfg, err := config.LoadClient(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("load client configuration: %w", err)
+	}
+	return NewFromConfig(cfg, logger)
+}
+
+func NewFromConfig(cfg config.ClientRuntimeConfig, logger *zap.Logger) (*App, error) {
+	if logger == nil {
+		logger = logutil.GetLogger(context.Background())
 	}
 	if !cfg.EnableTLS {
 		logger.Warn("TLS is disabled; this is only safe for local development or a protected network")
@@ -87,7 +95,7 @@ func (a *App) Run(ctx context.Context) error {
 		if authenticatedAt >= attemptStarted.UnixNano() && time.Since(time.Unix(0, authenticatedAt)) >= stableSession {
 			backoff = initialBackoff
 		}
-		a.Logger.Warn("control session disconnected", "error", err, "retry_in", backoff)
+		a.Logger.Warn("control session disconnected", zap.Error(err), zap.Duration("retry_in", backoff))
 		jitter := randomJitter(backoff / 2)
 		timer := time.NewTimer(backoff + jitter)
 		select {
@@ -195,7 +203,15 @@ func (a *App) runSession(parent context.Context) error {
 		}
 	}()
 	_ = conn.SetReadDeadline(time.Time{})
-	a.Logger.Info("control session authenticated", "session_id", session.id, "epoch", session.epoch)
+	sessionIDPrefix := session.id
+	if len(sessionIDPrefix) > 8 {
+		sessionIDPrefix = sessionIDPrefix[:8]
+	}
+	a.Logger.Info(
+		"control session authenticated",
+		zap.String("session_id_prefix", sessionIDPrefix),
+		zap.Uint64("epoch", session.epoch),
+	)
 	return session.readLoop(ctx)
 }
 
@@ -280,7 +296,7 @@ func (s *controlSession) readLoop(ctx context.Context) error {
 			return errors.New(protocol.ErrSessionStale)
 		case protocol.TypeError:
 			payload, _ := protocol.DecodePayload[protocol.ErrorPayload](message)
-			s.app.Logger.Warn("server control error", "code", payload.Code)
+			s.app.Logger.Warn("server control error", zap.String("code", payload.Code))
 		default:
 			return fmt.Errorf("unknown control message %q", message.Type)
 		}

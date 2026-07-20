@@ -1,17 +1,17 @@
 package store
 
 import (
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestEventDatabaseCanBeDeletedAndRebuilt(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "events.db")
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := zap.NewNop()
 	first, err := Open(path, logger)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestOpenFailsWithoutAWritableDatabaseDirectory(t *testing.T) {
 	if err := os.WriteFile(parent, []byte("file"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := Open(filepath.Join(parent, "events.db"), slog.Default()); err == nil || store != nil {
+	if store, err := Open(filepath.Join(parent, "events.db"), zap.NewNop()); err == nil || store != nil {
 		t.Fatal("event store opened beneath a regular file")
 	}
 }

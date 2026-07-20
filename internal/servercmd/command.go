@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,8 +12,11 @@ import (
 
 	"github.com/portpilot/portpilot/internal/cli"
 	"github.com/portpilot/portpilot/internal/config"
+	"github.com/portpilot/portpilot/internal/logging"
 	"github.com/portpilot/portpilot/internal/server"
 	"github.com/spf13/cobra"
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 )
@@ -36,31 +38,42 @@ func NewCommand() *cobra.Command {
 
 func newServerRunCommand() *cobra.Command {
 	var path string
-	var debug bool
 	command := &cobra.Command{
 		Use:   "run",
 		Short: "Run the PortPilot server",
 		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			level := slog.LevelInfo
-			if debug {
-				level = slog.LevelDebug
+			cfg, err := config.LoadServer(path)
+			if err != nil {
+				return fmt.Errorf("load server configuration: %w", err)
 			}
-			logger := server.DefaultLogger(level)
-			app, err := server.New(path, logger)
+			baseLogger, err := logging.Init(cfg.LogConfig)
+			if err != nil {
+				return fmt.Errorf("initialize logging: %w", err)
+			}
+			defer logging.Sync(baseLogger)
+			runtimeLogger := logutil.GetLogger(cmd.Context())
+			runtimeLogger.Info(
+				"logging initialized",
+				zap.String("component", "server"),
+				zap.String("level", cfg.LogConfig.Level),
+				zap.Bool("console", cfg.LogConfig.Console),
+				zap.Bool("file_enabled", cfg.LogConfig.File != ""),
+			)
+			app, err := server.NewFromConfig(cfg, runtimeLogger)
 			if err != nil {
 				return fmt.Errorf("initialize server: %w", err)
 			}
 			ctx, cancel := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 			if err := app.Run(ctx); err != nil {
+				runtimeLogger.Error("server stopped with error", zap.Error(err))
 				return fmt.Errorf("run server: %w", err)
 			}
 			return nil
 		},
 	}
 	command.Flags().StringVar(&path, "config", "server.json", "server configuration file")
-	command.Flags().BoolVar(&debug, "debug", false, "enable debug logging")
 	return command
 }
 

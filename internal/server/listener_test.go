@@ -3,17 +3,16 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"io"
-	"log/slog"
 	"net"
 	"testing"
 
 	"github.com/portpilot/portpilot/internal/config"
+	"go.uber.org/zap"
 )
 
 func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 	t.Parallel()
-	app := &App{Config: config.DefaultServerConfig(), Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	app := &App{Config: config.DefaultServerConfig(), Logger: zap.NewNop()}
 	manager := NewListenerManager(app)
 	defer manager.Close()
 

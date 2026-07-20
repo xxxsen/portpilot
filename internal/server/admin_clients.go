@@ -12,6 +12,7 @@ import (
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 type configMutation struct {
@@ -186,7 +187,11 @@ func (a *App) commitConfigMutation(
 	if err != nil {
 		if auditErr := a.finishConfigAudit(r.Context(), event.ID, "failure", current.Revision, err, nil); auditErr != nil {
 			a.storeError.Store(true)
-			a.Logger.Error("finalize failed configuration audit", "event_id", event.ID, "error", auditErr)
+			a.Logger.Error(
+				"finalize failed configuration audit",
+				zap.String("event_id", event.ID),
+				zap.Error(auditErr),
+			)
 		}
 		if errors.Is(err, config.ErrRevisionConflict) {
 			writeJSON(w, http.StatusConflict, map[string]any{
@@ -206,7 +211,11 @@ func (a *App) commitConfigMutation(
 	}
 	if err := a.finishConfigAudit(r.Context(), event.ID, "success", updated.Revision, nil, details); err != nil {
 		a.storeError.Store(true)
-		a.Logger.Error("finalize configuration audit failed", "event_id", event.ID, "error", err)
+		a.Logger.Error(
+			"finalize configuration audit failed",
+			zap.String("event_id", event.ID),
+			zap.Error(err),
+		)
 	}
 	return updated, true
 }

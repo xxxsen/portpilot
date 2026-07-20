@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +16,8 @@ import (
 	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
 	"github.com/portpilot/portpilot/internal/version"
+	"github.com/xxxsen/common/logutil"
+	"go.uber.org/zap"
 )
 
 type App struct {
@@ -35,7 +35,7 @@ type App struct {
 	Admin          *AdminAuth
 	ControlLimiter *auth.RateLimiter
 	DataLimiter    *auth.RateLimiter
-	Logger         *slog.Logger
+	Logger         *zap.Logger
 
 	adminServer *http.Server
 	dataServer  *http.Server
@@ -47,10 +47,17 @@ type App struct {
 	closeOnce        sync.Once
 }
 
-func New(configPath string, logger *slog.Logger) (*App, error) {
+func New(configPath string, logger *zap.Logger) (*App, error) {
 	cfg, err := config.LoadServer(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("load server configuration: %w", err)
+	}
+	return NewFromConfig(cfg, logger)
+}
+
+func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
+	if logger == nil {
+		logger = logutil.GetLogger(context.Background())
 	}
 	configManager, err := config.NewManagerWithPolicy(
 		cfg.ClientConfigFile, cfg.AdminAddr, cfg.ServerAddr, cfg.TargetPolicy,
@@ -180,13 +187,13 @@ func New(configPath string, logger *slog.Logger) (*App, error) {
 func (a *App) Run(ctx context.Context) error {
 	errorsCh := make(chan error, 2)
 	go func() {
-		a.Logger.Info("admin server listening", "address", a.Config.AdminAddr)
+		a.Logger.Info("admin server listening", zap.String("address", a.Config.AdminAddr))
 		if err := a.adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errorsCh <- fmt.Errorf("admin server: %w", err)
 		}
 	}()
 	go func() {
-		a.Logger.Info("control/data server listening", "address", a.Config.ServerAddr)
+		a.Logger.Info("control/data server listening", zap.String("address", a.Config.ServerAddr))
 		if err := a.dataServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errorsCh <- fmt.Errorf("control/data server: %w", err)
 		}
@@ -248,9 +255,4 @@ func (a *App) serveData(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-func DefaultLogger(level slog.Level) *slog.Logger {
-	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
-	return slog.New(handler)
 }
