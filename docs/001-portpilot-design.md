@@ -734,7 +734,7 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 | `make fault-test` | session、ticket、frame、目标和资源故障 |
 | `make soak-test` | 并发、控制轮换、数据完整性和资源回收 |
 | `make ci` | 确定性构建、lint、unit、race、Web 和 integration 汇总 |
-| `make acceptance` | 正式进程完整验收和发布镜像构建 |
+| `make acceptance` | `master` 合并时的正式进程完整验收和 15 分钟 soak |
 
 没有单元测试覆盖率百分比阈值，但安全、协议和生命周期路径必须具备正常、错误和边界测试。
 
@@ -746,7 +746,9 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 - `portpilot-client`
 - `portpilot-web`
 
-Makefile 不提供 Docker/Compose 运行、容器 smoke 或容器测试目标。镜像只验证发布制品可以构建；所有功能正确性由 `make dev` 启动的正式进程验证。
+Makefile 不提供 Docker/Compose 运行、容器 smoke 或容器测试目标。镜像只验证发布制品可以构建；
+所有功能正确性由 `make dev` 启动的正式进程验证。`master` 合并提交执行 `make acceptance`，
+正式版本 tag 只构建并发布三张镜像，不重复执行 soak。
 
 ## 15. 设计决策摘要
 

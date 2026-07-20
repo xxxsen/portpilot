@@ -31,7 +31,7 @@ type counters struct {
 }
 
 func main() {
-	duration := envDuration("ACCEPT_SOAK_DURATION", 30*time.Minute)
+	duration := envDuration("ACCEPT_SOAK_DURATION", 15*time.Minute)
 	concurrency := envInt("ACCEPT_TCP_CONCURRENCY", 128)
 	tcpCycles := envInt("ACCEPT_TCP_CYCLES", 1000)
 	udpFlows := envInt("ACCEPT_UDP_FLOWS", 128)

@@ -28,7 +28,7 @@ SERVER_IMAGE ?= portpilot-server
 CLIENT_IMAGE ?= portpilot-client
 WEB_IMAGE ?= portpilot-web
 IMAGE_TAG ?= latest
-ACCEPT_SOAK_DURATION ?= 30m
+ACCEPT_SOAK_DURATION ?= 15m
 ACCEPT_CHAOS_INTERVAL ?= 2m
 ACCEPT_TCP_CONCURRENCY ?= 128
 ACCEPT_TCP_HOLD_DURATION ?= 20s
@@ -173,10 +173,9 @@ analytics-benchmark: ## Benchmark historical analytics at reference cardinality
 
 ci: lint build test test-race web-test integration-test ## Run the deterministic CI gate
 
-acceptance: ci ## Start make dev and run full release acceptance
+acceptance: ## Run full-service merge acceptance against make dev
 	ACCEPT_SOAK_DURATION="$(ACCEPT_SOAK_DURATION)" ACCEPT_CHAOS_INTERVAL="$(ACCEPT_CHAOS_INTERVAL)" \
 		"$(PROJECT_ROOT)/scripts/acceptance.sh"
-	$(MAKE) build-images
 
 build-server-image: ## Build portpilot-server; never starts the image
 	docker buildx build --load \

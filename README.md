@@ -71,11 +71,15 @@ make fault-test
 make ci
 ```
 
-完整发布验收会自行启动和清理 `make dev`，执行 smoke、Web E2E、故障注入、30 分钟 chaos soak，并在最后构建三个镜像：
+主分支 `master` 合并验收会自行启动和清理 `make dev`，执行 smoke、Web E2E、故障注入和 15 分钟
+chaos soak：
 
 ```bash
 make acceptance
 ```
+
+`make acceptance` 不重复执行 `make ci`，也不构建镜像。Pull Request 和 `master` 的确定性门禁使用
+`make ci`；正式版本 tag 只构建并发布三个镜像，不重复执行 soak。
 
 单元测试不设置覆盖率百分比阈值，但安全、协议和生命周期路径必须有测试。
 
