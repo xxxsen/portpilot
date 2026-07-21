@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +23,7 @@ import (
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/relay"
 	"github.com/portpilot/portpilot/internal/transport"
+	"github.com/portpilot/portpilot/internal/version"
 	"github.com/xxxsen/common/logutil"
 	"go.uber.org/zap"
 )
@@ -28,6 +31,7 @@ import (
 type App struct {
 	Config config.ClientRuntimeConfig
 	Logger *zap.Logger
+	Agent  protocol.Agent
 	active atomic.Pointer[controlSession]
 	authAt atomic.Int64
 }
@@ -68,7 +72,19 @@ func NewFromConfig(cfg config.ClientRuntimeConfig, logger *zap.Logger) (*App, er
 	if !cfg.EnableTLS {
 		logger.Warn("TLS is disabled; this is only safe for local development or a protected network")
 	}
-	return &App{Config: cfg, Logger: logger}, nil
+	hostname, _ := os.Hostname()
+	return &App{
+		Config: cfg, Logger: logger,
+		Agent: protocol.Agent{
+			Version: version.Version, Commit: version.Commit, BuildTime: version.BuildTime,
+			GoVersion: runtime.Version(), OS: runtime.GOOS, Arch: runtime.GOARCH,
+			Hostname: hostname, StartedAt: time.Now().UTC().UnixMilli(),
+			ProtocolVersion: protocol.Version,
+			Capabilities: []string{
+				"tcp-smux", "tcp-direct", "udp-smux-datagram",
+			},
+		},
+	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -138,6 +154,7 @@ func (a *App) runSession(parent context.Context) error {
 	}
 	init, _ := protocol.NewMessage(protocol.TypeAuthInit, protocol.AuthInit{
 		ClientID: a.Config.ClientID, Role: "control", ClientNonce: clientNonce,
+		Agent: &a.Agent,
 	})
 	if err := conn.WriteJSON(init); err != nil {
 		return err
@@ -257,6 +274,7 @@ func (s *controlSession) readLoop(ctx context.Context) error {
 		switch message.Type {
 		case protocol.TypePing:
 			pong, _ := protocol.NewMessage(protocol.TypePong, map[string]string{"time": time.Now().UTC().Format(time.RFC3339Nano)})
+			pong.RequestID = message.RequestID
 			if err := s.send(pong); err != nil {
 				return err
 			}

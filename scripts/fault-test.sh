@@ -24,4 +24,5 @@ export GOCACHE="${ROOT}/.cache/go-build/${GO_TOOLCHAIN_VERSION}"
   "${ROOT}/internal/config" \
   "${ROOT}/internal/relay" \
   "${ROOT}/internal/store"
-exec "${GO_BIN}" run "${ROOT}/test/acceptance/fault"
+PORTPILOT_DEV_SERVER_LOG="${PORTPILOT_DEV_SERVER_LOG:-${ROOT}/.dev-data/logs/server.log}" \
+  exec "${GO_BIN}" run "${ROOT}/test/acceptance/fault"

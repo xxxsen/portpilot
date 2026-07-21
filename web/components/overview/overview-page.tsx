@@ -1,17 +1,27 @@
 "use client";
 
+import { useState } from "react";
 import { Activity, Cable, Network, Server, Users } from "lucide-react";
 import type { AuditEvent, ClientView, Summary } from "@/lib/types";
+import {
+  ClientDetailDialog,
+  ClientStatus,
+  formatClientTime,
+} from "@/components/clients/client-detail-dialog";
 
 export function OverviewPage({
   summary,
   clients,
   events,
+  onOpenNetwork,
 }: {
   summary: Summary | null;
   clients: ClientView[];
   events: AuditEvent[];
+  onOpenNetwork: (clientID: string) => void;
 }) {
+  const [detailClientID, setDetailClientID] = useState("");
+  const detail = clients.find((client) => client.client_id === detailClientID) ?? null;
   const stats = [
     {label: "在线客户端", value: summary?.online_clients ?? 0, icon: Users},
     {label: "代理监听", value: summary?.listeners ?? 0, icon: Network},
@@ -27,21 +37,24 @@ export function OverviewPage({
       </section>
       <section className="section-block">
         <div className="section-heading"><div><h2>客户端状态</h2><p>控制会话与 smux 池</p></div></div>
-        <div className="table-wrap"><table><thead><tr><th>客户端</th><th>状态</th><th>Epoch</th><th>smux</th><th>活动流</th></tr></thead><tbody>
-          {clients.map((client) => <tr key={client.client_id}><td><strong>{client.remark}</strong><small>{client.client_id}</small></td><td><Status value={client.state} /></td><td>{client.epoch || "-"}</td><td>{client.mux_sessions}</td><td>{client.active_streams}</td></tr>)}
+        <div className="table-wrap"><table className="overview-client-table"><thead><tr><th>客户端</th><th>状态 / 最后心跳</th><th>Epoch</th><th>smux</th><th>活动流</th><th aria-label="操作" /></tr></thead><tbody>
+          {clients.map((client) => <tr key={client.client_id} className="clickable-row overview-client-row" onClick={() => setDetailClientID(client.client_id)}>
+            <td><strong>{client.remark}</strong><small>{client.client_id}</small></td>
+            <td><ClientStatus value={client.state} /><small>心跳 {formatClientTime(client.session?.last_seen_at ?? 0)}</small></td>
+            <td>{client.epoch || "-"}</td><td>{client.mux_sessions}</td><td>{client.active_streams}</td>
+            <td><button className="icon-button" title="查看网络活动" aria-label={`查看 ${client.client_id} 网络活动`} onClick={(event) => {event.stopPropagation(); onOpenNetwork(client.client_id);}}><Activity size={17} /></button></td>
+          </tr>)}
+          {!clients.length && <tr><td colSpan={6}><div className="empty-inline">还没有客户端</div></td></tr>}
         </tbody></table></div>
       </section>
       <section className="section-block">
-        <div className="section-heading"><div><h2>最近事件</h2><p>管理与安全审计摘要</p></div></div>
+        <div className="section-heading"><div><h2>最近事件</h2><p>管理与客户端生命周期审计摘要</p></div></div>
         <div className="event-list">
           {events.map((event) => <div className="event-row" key={event.id}><Activity size={16} /><div className="grow"><strong>{event.event_type}</strong><p>{event.summary || event.reason_code}</p></div><time>{new Date(event.occurred_at).toLocaleString()}</time></div>)}
           {!events.length && <div className="empty-state">暂无事件</div>}
         </div>
       </section>
+      <ClientDetailDialog client={detail} onClose={() => setDetailClientID("")} />
     </>
   );
-}
-
-function Status({value}: {value: string}) {
-  return <span className={`status status-${value.toLowerCase()}`}><i />{value}</span>;
 }

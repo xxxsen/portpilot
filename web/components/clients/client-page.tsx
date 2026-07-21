@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Check, Copy, KeyRound, Pencil, Plus, Server, Unplug } from "lucide-react";
+import { Check, Copy, Info, KeyRound, Pencil, Plus, Server, Unplug } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { ClientList, ClientView } from "@/lib/types";
 import { AlertDialog, Dialog } from "@/components/ui/dialog";
+import { ClientDetailDialog, ClientStatus } from "@/components/clients/client-detail-dialog";
 
 type ClientEditor = {mode: "create"; client?: undefined} | {mode: "edit"; client: ClientView};
 
@@ -25,6 +26,7 @@ export function ClientPage({
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [detail, setDetail] = useState<ClientView | null>(null);
 
   const mutationError = async (caught: unknown) => {
     if (caught instanceof ApiError && caught.status === 409) {
@@ -81,7 +83,7 @@ export function ClientPage({
             <div className="grow client-main">
               <div className="row-title">
                 <strong>{client.remark}</strong>
-                <Status value={client.state} />
+                <ClientStatus value={client.state} />
               </div>
               <button
                 className="copy-id mono"
@@ -93,10 +95,15 @@ export function ClientPage({
               <div className="client-meta">
                 <span>{client.proxy_count} 条代理</span>
                 <span>{client.mux_sessions} 个 smux session</span>
+                <span>{client.agent ? `${client.agent.version} · ${client.agent.os}/${client.agent.arch}` : "Agent 信息不可用"}</span>
+                <span>最后通信 {client.session ? localTime(client.session.last_seen_at) : "-"}</span>
                 <time title={utcTime(client.created_at)}>创建 {localTime(client.created_at)}</time>
                 <time title={utcTime(client.updated_at)}>修改 {localTime(client.updated_at)}</time>
               </div>
             </div>
+            <button className="icon-button" onClick={() => setDetail(client)} title="客户端详情" aria-label={`查看 ${client.client_id} 详情`}>
+              <Info size={17} />
+            </button>
             <button className="icon-button" onClick={() => setEditor({mode: "edit", client})} title="编辑客户端" aria-label={`编辑 ${client.client_id}`}>
               <Pencil size={17} />
             </button>
@@ -140,6 +147,7 @@ export function ClientPage({
         busy={busy}
         onConfirm={() => void rotateToken()}
       />
+      <ClientDetailDialog client={detail} onClose={() => setDetail(null)} />
       <Dialog
         open={Boolean(oneTimeToken)}
         onOpenChange={() => undefined}
@@ -250,10 +258,6 @@ function ClientEditorDialog({
       </form>
     </Dialog>
   );
-}
-
-function Status({value}: {value: string}) {
-  return <span className={`status status-${value.toLowerCase()}`}><i />{value}</span>;
 }
 
 function localTime(value: number) {

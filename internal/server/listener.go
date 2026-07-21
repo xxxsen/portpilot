@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/config"
 	"go.uber.org/zap"
 )
@@ -17,6 +18,7 @@ type ProxyRuntime struct {
 	ClientRemark string
 	Proxy        config.ProxyEnvelope
 	Data         config.TunnelData
+	Access       accesspolicy.Policy
 }
 
 type ListenerHandle struct {
@@ -146,6 +148,14 @@ func (m *ListenerManager) serveTCP(handle *ListenerHandle) {
 			continue
 		}
 		copy := *runtime
+		allowed, source := m.app.allowExternal(copy, conn.RemoteAddr())
+		if !allowed {
+			_ = conn.Close()
+			m.app.recordExternalAccessDenied(
+				copy, "tcp", source, 0,
+			)
+			continue
+		}
 		go m.app.Tunnels.HandleExternal(context.Background(), copy, conn)
 	}
 }
@@ -167,6 +177,13 @@ func (m *ListenerManager) serveUDP(handle *ListenerHandle) {
 		}
 		data := append([]byte(nil), buffer[:n]...)
 		copy := *runtime
+		allowed, sourceIP := m.app.allowExternal(copy, address)
+		if !allowed {
+			m.app.recordExternalAccessDenied(
+				copy, "udp", sourceIP, n,
+			)
+			continue
+		}
 		m.app.UDP.HandleDatagram(copy, handle.udp, address, data)
 	}
 }
@@ -237,7 +254,7 @@ func runtimeMap(file config.ClientFile, defaultTransport string) (map[string]Pro
 			}
 			result[proxy.ProxyID] = ProxyRuntime{
 				ClientID: client.ClientID, ClientRemark: client.Remark,
-				Proxy: proxy, Data: data,
+				Proxy: proxy, Data: data, Access: accesspolicy.Compile(data.AccessPolicy),
 			}
 		}
 	}

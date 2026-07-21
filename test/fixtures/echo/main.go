@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -19,23 +21,29 @@ func main() {
 
 func mainCode() int {
 	tcpAddress := flag.String("tcp", "127.0.0.1:18080", "TCP echo address")
+	proxyTCPAddress := flag.String("proxy-tcp", "127.0.0.1:18082", "PROXY protocol v1 TCP echo address")
 	udpAddress := flag.String("udp", "127.0.0.1:18081", "UDP echo address")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := run(ctx, *tcpAddress, *udpAddress); err != nil {
+	if err := run(ctx, *tcpAddress, *proxyTCPAddress, *udpAddress); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0
 }
 
-func run(ctx context.Context, tcpAddress, udpAddress string) error {
+func run(ctx context.Context, tcpAddress, proxyTCPAddress, udpAddress string) error {
 	tcpListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", tcpAddress)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tcpListener.Close() }()
+	proxyTCPListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", proxyTCPAddress)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = proxyTCPListener.Close() }()
 	resolved, err := net.ResolveUDPAddr("udp", udpAddress)
 	if err != nil {
 		return err
@@ -45,13 +53,15 @@ func run(ctx context.Context, tcpAddress, udpAddress string) error {
 		return err
 	}
 	defer func() { _ = udpConn.Close() }()
-	fmt.Printf("echo fixture ready tcp=%s udp=%s\n", tcpAddress, udpAddress)
-	errCh := make(chan error, 2)
-	go serveTCP(tcpListener, errCh)
+	fmt.Printf("echo fixture ready tcp=%s proxy_tcp=%s udp=%s\n", tcpAddress, proxyTCPAddress, udpAddress)
+	errCh := make(chan error, 3)
+	go serveTCP(tcpListener, false, errCh)
+	go serveTCP(proxyTCPListener, true, errCh)
 	go serveUDP(udpConn, errCh)
 	go func() {
 		<-ctx.Done()
 		_ = tcpListener.Close()
+		_ = proxyTCPListener.Close()
 		_ = udpConn.Close()
 	}()
 	select {
@@ -65,7 +75,7 @@ func run(ctx context.Context, tcpAddress, udpAddress string) error {
 	}
 }
 
-func serveTCP(listener net.Listener, errCh chan<- error) {
+func serveTCP(listener net.Listener, expectProxyProtocol bool, errCh chan<- error) {
 	var clients sync.WaitGroup
 	defer clients.Wait()
 	for {
@@ -78,7 +88,18 @@ func serveTCP(listener net.Listener, errCh chan<- error) {
 		go func() {
 			defer clients.Done()
 			defer func() { _ = conn.Close() }()
-			_, _ = io.Copy(conn, conn)
+			if !expectProxyProtocol {
+				_, _ = io.Copy(conn, conn)
+				return
+			}
+			reader := bufio.NewReaderSize(conn, 108)
+			header, err := reader.ReadString('\n')
+			if err != nil || len(header) > 107 ||
+				!strings.HasPrefix(header, "PROXY TCP") ||
+				!strings.HasSuffix(header, "\r\n") {
+				return
+			}
+			_, _ = io.Copy(conn, reader)
 		}()
 	}
 }

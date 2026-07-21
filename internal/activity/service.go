@@ -36,16 +36,19 @@ type Config struct {
 }
 
 type Start struct {
-	Protocol     string
-	ClientID     string
-	ClientRemark string
-	ProxyID      string
-	ProxyRemark  string
-	ExternalAddr string
-	ServerBind   string
-	TargetAddr   string
-	Transport    string
-	SessionEpoch uint64
+	Protocol                string
+	ClientID                string
+	ClientRemark            string
+	ProxyID                 string
+	ProxyRemark             string
+	ExternalAddr            string
+	ServerBind              string
+	TargetAddr              string
+	Transport               string
+	SessionEpoch            uint64
+	UpLimitBytesPerSecond   int64
+	DownLimitBytesPerSecond int64
+	ProxyProtocolEnabled    bool
 }
 
 type Metrics struct {
@@ -78,27 +81,37 @@ type Handle struct {
 	sessionEpoch uint64
 	acceptedAt   int64
 
-	state                atomic.Pointer[string]
-	connectedAt          atomic.Int64
-	lastActivityAt       atomic.Int64
-	closedAt             atomic.Int64
-	upBytes              atomic.Int64
-	downBytes            atomic.Int64
-	upPackets            atomic.Int64
-	downPackets          atomic.Int64
-	sampledUpBytes       atomic.Int64
-	sampledDownBytes     atomic.Int64
-	sampledUpPackets     atomic.Int64
-	sampledDownPackets   atomic.Int64
-	rateSampledUpBytes   atomic.Int64
-	rateSampledDownBytes atomic.Int64
-	upBytesPerSecond     atomic.Int64
-	downBytesPerSecond   atomic.Int64
-	rateSampledAt        atomic.Int64
-	rateWindowMillis     atomic.Int64
-	closeReasonCode      atomic.Pointer[string]
-	closeReason          atomic.Pointer[string]
-	closed               atomic.Bool
+	state                   atomic.Pointer[string]
+	connectedAt             atomic.Int64
+	lastActivityAt          atomic.Int64
+	closedAt                atomic.Int64
+	upBytes                 atomic.Int64
+	downBytes               atomic.Int64
+	upPackets               atomic.Int64
+	downPackets             atomic.Int64
+	sampledUpBytes          atomic.Int64
+	sampledDownBytes        atomic.Int64
+	sampledUpPackets        atomic.Int64
+	sampledDownPackets      atomic.Int64
+	rateSampledUpBytes      atomic.Int64
+	rateSampledDownBytes    atomic.Int64
+	upBytesPerSecond        atomic.Int64
+	downBytesPerSecond      atomic.Int64
+	rateSampledAt           atomic.Int64
+	rateWindowMillis        atomic.Int64
+	upLimitBytesPerSecond   atomic.Int64
+	downLimitBytesPerSecond atomic.Int64
+	upThrottledMillis       atomic.Int64
+	downThrottledMillis     atomic.Int64
+	upRateLimitedPackets    atomic.Int64
+	downRateLimitedPackets  atomic.Int64
+	upRateLimitedBytes      atomic.Int64
+	downRateLimitedBytes    atomic.Int64
+	proxyProtocolEnabled    bool
+	proxyProtocolHeaderSent atomic.Bool
+	closeReasonCode         atomic.Pointer[string]
+	closeReason             atomic.Pointer[string]
+	closed                  atomic.Bool
 }
 
 type writeCommand struct {
@@ -195,7 +208,10 @@ func (s *Service) Start(input Start) (*Handle, error) {
 		serverBind:   input.ServerBind,
 		targetAddr:   input.TargetAddr,
 		sessionEpoch: input.SessionEpoch, acceptedAt: now,
+		proxyProtocolEnabled: input.ProxyProtocolEnabled,
 	}
+	handle.upLimitBytesPerSecond.Store(input.UpLimitBytesPerSecond)
+	handle.downLimitBytesPerSecond.Store(input.DownLimitBytesPerSecond)
 	handle.setState("accepted")
 	handle.setTransport(input.Transport)
 	handle.lastActivityAt.Store(now)
@@ -302,6 +318,46 @@ func (h *Handle) AddDown(bytes int, packets int64) {
 	h.lastActivityAt.Store(time.Now().UTC().UnixMilli())
 }
 
+func (h *Handle) SetRateLimits(up, down int64) {
+	if h == nil || h.closed.Load() {
+		return
+	}
+	h.upLimitBytesPerSecond.Store(up)
+	h.downLimitBytesPerSecond.Store(down)
+}
+
+func (h *Handle) AddUpThrottled(value time.Duration) {
+	if h != nil && value > 0 {
+		h.upThrottledMillis.Add(value.Milliseconds())
+	}
+}
+
+func (h *Handle) AddDownThrottled(value time.Duration) {
+	if h != nil && value > 0 {
+		h.downThrottledMillis.Add(value.Milliseconds())
+	}
+}
+
+func (h *Handle) AddUpRateLimited(bytes int) {
+	if h != nil && bytes > 0 {
+		h.upRateLimitedPackets.Add(1)
+		h.upRateLimitedBytes.Add(int64(bytes))
+	}
+}
+
+func (h *Handle) AddDownRateLimited(bytes int) {
+	if h != nil && bytes > 0 {
+		h.downRateLimitedPackets.Add(1)
+		h.downRateLimitedBytes.Add(int64(bytes))
+	}
+}
+
+func (h *Handle) MarkProxyProtocolHeaderSent() {
+	if h != nil && h.proxyProtocolEnabled {
+		h.proxyProtocolHeaderSent.Store(true)
+	}
+}
+
 func (h *Handle) Close(reasonCode, reason string) {
 	h.finish("closed", reasonCode, reason)
 }
@@ -377,11 +433,22 @@ func (h *Handle) Snapshot() store.NetworkConnection {
 		LastActivityAt: h.lastActivityAt.Load(),
 		UpBytes:        h.upBytes.Load(), DownBytes: h.downBytes.Load(),
 		UpPackets: h.upPackets.Load(), DownPackets: h.downPackets.Load(),
-		UpBytesPerSecond:   h.upBytesPerSecond.Load(),
-		DownBytesPerSecond: h.downBytesPerSecond.Load(),
-		RateSampledAt:      h.rateSampledAt.Load(),
-		RateWindowMillis:   h.rateWindowMillis.Load(),
-		CloseReasonCode:    reasonCode, CloseReason: reason,
+		UpBytesPerSecond:        h.upBytesPerSecond.Load(),
+		DownBytesPerSecond:      h.downBytesPerSecond.Load(),
+		RateSampledAt:           h.rateSampledAt.Load(),
+		RateWindowMillis:        h.rateWindowMillis.Load(),
+		UpLimitBytesPerSecond:   h.upLimitBytesPerSecond.Load(),
+		DownLimitBytesPerSecond: h.downLimitBytesPerSecond.Load(),
+		UpThrottledMillis:       h.upThrottledMillis.Load(),
+		DownThrottledMillis:     h.downThrottledMillis.Load(),
+		UpRateLimitedPackets:    h.upRateLimitedPackets.Load(),
+		DownRateLimitedPackets:  h.downRateLimitedPackets.Load(),
+		UpRateLimitedBytes:      h.upRateLimitedBytes.Load(),
+		DownRateLimitedBytes:    h.downRateLimitedBytes.Load(),
+		ProxyProtocolEnabled:    h.proxyProtocolEnabled,
+		ProxyProtocolVersion:    proxyProtocolVersion(h.proxyProtocolEnabled),
+		ProxyProtocolHeaderSent: h.proxyProtocolHeaderSent.Load(),
+		CloseReasonCode:         reasonCode, CloseReason: reason,
 	}
 	if value := h.connectedAt.Load(); value > 0 {
 		connection.ConnectedAt = &value
@@ -390,6 +457,13 @@ func (h *Handle) Snapshot() store.NetworkConnection {
 		connection.ClosedAt = &value
 	}
 	return connection
+}
+
+func proxyProtocolVersion(enabled bool) int {
+	if enabled {
+		return 1
+	}
+	return 0
 }
 
 func (h *Handle) setState(value string) {

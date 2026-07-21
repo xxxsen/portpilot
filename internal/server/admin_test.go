@@ -43,26 +43,27 @@ func TestAdminSessionExpiryAndCSRF(t *testing.T) {
 	}
 }
 
-func TestRequestSourceOnlyTrustsConfiguredProxy(t *testing.T) {
+func TestRequestSourceUsesConfiguredHeaderAndFallback(t *testing.T) {
 	t.Parallel()
-	app := &App{Config: config.ServerConfig{TrustedProxies: []string{"127.0.0.1/32"}}}
+	app := &App{Config: config.ServerConfig{RealIPHeader: "X-Real-IP"}}
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	request.RemoteAddr = "198.51.100.10:1234"
 	request.Header.Set("X-Forwarded-For", "203.0.113.9")
 	request.Header.Set("X-Forwarded-Proto", "https")
 	if source := app.requestSource(request); source != "198.51.100.10" {
-		t.Fatalf("untrusted proxy spoofed source: %q", source)
-	}
-	if app.secureRequest(request) {
-		t.Fatal("untrusted proxy spoofed HTTPS scheme")
-	}
-
-	request.RemoteAddr = "127.0.0.1:4321"
-	if source := app.requestSource(request); source != "203.0.113.9" {
-		t.Fatalf("trusted proxy source not used: %q", source)
+		t.Fatalf("missing configured header did not fall back: %q", source)
 	}
 	if !app.secureRequest(request) {
-		t.Fatal("trusted proxy HTTPS scheme was ignored")
+		t.Fatal("forwarded HTTPS scheme was ignored")
+	}
+
+	request.Header.Set("X-Real-IP", "203.0.113.9, 127.0.0.1")
+	if source := app.requestSource(request); source != "203.0.113.9" {
+		t.Fatalf("first configured header address not used: %q", source)
+	}
+	request.Header.Set("X-Real-IP", "unknown, 203.0.113.9")
+	if source := app.requestSource(request); source != "198.51.100.10" {
+		t.Fatalf("invalid first header address did not fall back: %q", source)
 	}
 }
 

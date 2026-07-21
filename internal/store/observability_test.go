@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,72 @@ func TestAuditRoundTripFilteringAndPendingRecovery(t *testing.T) {
 	}
 	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != event.ID {
 		t.Fatalf("unexpected audit page: %#v", page)
+	}
+}
+
+func TestClientAgentAuditEventIsAccepted(t *testing.T) {
+	t.Parallel()
+	database, err := Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	event := AuditEvent{
+		Category: "security", EventType: "client_agent_invalid", Outcome: "denied",
+		ActorType: "client", Summary: "invalid client agent",
+	}
+	if _, err := database.WriteAudit(t.Context(), event); err != nil {
+		t.Fatal(err)
+	}
+	page, err := database.ListAudit(t.Context(), AuditQuery{Page: 1, PageSize: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 {
+		t.Fatalf("audit total = %d, want 1", page.Total)
+	}
+}
+
+func TestRuntimeLogEventsAreRejectedByAuditStore(t *testing.T) {
+	t.Parallel()
+	for _, eventType := range []string{
+		"external_access_denied", "udp_drop", "proxy_protocol_write_failed", "security",
+	} {
+		_, _, err := normalizeAuditEvent(AuditEvent{
+			Category: "system", EventType: eventType, Outcome: "failure",
+			ActorType: "system", Summary: "runtime log event",
+		})
+		if err == nil || !strings.Contains(err.Error(), "invalid audit event_type") {
+			t.Fatalf("runtime event %q was accepted: %v", eventType, err)
+		}
+	}
+}
+
+func TestLegacyRuntimeLogEventsAreHiddenFromAuditQueries(t *testing.T) {
+	t.Parallel()
+	database, err := Open(":memory:", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	const eventID = "0123456789abcdef0123456789abcdef"
+	if _, err := database.db.ExecContext(t.Context(), `INSERT INTO audit_events (
+		id, occurred_at, category, event_type, outcome, actor_type
+	) VALUES (?, ?, ?, ?, ?, ?)`,
+		eventID, time.Now().UnixMilli(), "security", "external_access_denied", "denied", "external",
+	); err != nil {
+		t.Fatal(err)
+	}
+	page, err := database.ListAudit(t.Context(), AuditQuery{Page: 1, PageSize: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("legacy runtime event leaked into audit list: %#v", page.Items)
+	}
+	if _, err := database.AuditDetail(t.Context(), eventID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("legacy runtime event detail remained visible: %v", err)
 	}
 }
 

@@ -153,6 +153,8 @@ PortPilot dev environment is ready
   Admin API: ${ADMIN_URL}
   TCP proxy: 127.0.0.1:7000
   TCP direct: 127.0.0.1:7002
+  TCP PROXY:  127.0.0.1:7003
+  TCP limited: 127.0.0.1:7004
   UDP proxy: 127.0.0.1:7001
   Logs:      ${LOG_DIR}
   Smoke:     make smoke-dev

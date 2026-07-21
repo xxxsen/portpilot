@@ -1,12 +1,15 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Plus, Settings2, Trash2 } from "lucide-react";
 import type { ClientFile, Proxy, TunnelData } from "@/lib/types";
+import { api } from "@/lib/api";
 import { validateProxyDraft } from "@/lib/validation";
 import { AlertDialog, Dialog } from "@/components/ui/dialog";
 
 type Editor = {clientId: string; proxy?: Proxy};
+type AccessPolicy = {allow_cidrs: string[]; deny_cidrs: string[]};
+type AccessPolicyResponse = {global: AccessPolicy};
 
 export function ProxyPage({
   config,
@@ -20,10 +23,16 @@ export function ProxyPage({
   const [selectedClient, setSelectedClient] = useState("");
   const [editor, setEditor] = useState<Editor | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{clientId: string; proxy: Proxy} | null>(null);
+  const [globalAccess, setGlobalAccess] = useState<AccessPolicy>({allow_cidrs: [], deny_cidrs: []});
   const rows = useMemo(
     () => config.client_config.flatMap((client) => client.proxy_list.map((proxy) => ({client, proxy}))),
     [config],
   );
+  useEffect(() => {
+    void api<AccessPolicyResponse>("/api/access-policy")
+      .then((result) => setGlobalAccess(result.global))
+      .catch(() => undefined);
+  }, []);
 
   const remove = async () => {
     if (!removeTarget) return;
@@ -70,7 +79,7 @@ export function ProxyPage({
       ) : (
         <div className="table-wrap">
           <table>
-            <thead><tr><th>代理</th><th>客户端</th><th>协议</th><th>服务端监听</th><th>内网目标</th><th>承载</th><th>启用</th><th /></tr></thead>
+            <thead><tr><th>代理</th><th>客户端</th><th>协议</th><th>服务端监听</th><th>内网目标</th><th>来源策略</th><th>PROXY</th><th>限速</th><th>承载</th><th>启用</th><th /></tr></thead>
             <tbody>
               {rows.map(({client, proxy}) => (
                 <tr key={`${client.client_id}-${proxy.proxy_id}`}>
@@ -79,6 +88,9 @@ export function ProxyPage({
                   <td><span className={`network-tag ${proxy.data.network}`}>{proxy.data.network.toUpperCase()}</span></td>
                   <td className="mono">{proxy.data.bind}</td>
                   <td className="mono">{proxy.data.connect}</td>
+                  <td>{accessSummary(proxy.data.access_policy)}</td>
+                  <td>{proxy.data.enable_proxy_protocol ? "v1" : "关闭"}</td>
+                  <td>{rateSummary(proxy.data)}</td>
                   <td>{proxy.data.transport}</td>
                   <td>
                     <label className="switch" title={proxy.enabled ? "停用代理" : "启用代理"}>
@@ -95,7 +107,7 @@ export function ProxyPage({
                   <td><button className="icon-button danger" onClick={() => setRemoveTarget({clientId: client.client_id, proxy})} title="删除代理" aria-label={`删除 ${proxy.proxy_id}`}><Trash2 size={17} /></button></td>
                 </tr>
               ))}
-              {!rows.length && <tr><td colSpan={8}><div className="empty-inline">暂无代理规则</div></td></tr>}
+              {!rows.length && <tr><td colSpan={11}><div className="empty-inline">暂无代理规则</div></td></tr>}
             </tbody>
           </table>
         </div>
@@ -104,6 +116,7 @@ export function ProxyPage({
         <ProxyEditor
           editor={editor}
           config={config}
+          globalAccess={globalAccess}
           busy={busy}
           onClose={() => setEditor(null)}
           onSave={async (clientID, proxy) => {
@@ -134,19 +147,27 @@ export function ProxyPage({
 function ProxyEditor({
   editor,
   config,
+  globalAccess,
   busy,
   onClose,
   onSave,
 }: {
   editor: Editor;
   config: ClientFile;
+  globalAccess: AccessPolicy;
   busy: boolean;
   onClose: () => void;
   onSave: (clientID: string, proxy: Proxy) => Promise<void>;
 }) {
   const proxy = editor.proxy;
-  const initial: TunnelData = proxy?.data ?? {
-    network: "tcp", transport: "auto", bind: "127.0.0.1:7000", connect: "127.0.0.1:80",
+  const initialValue = proxy?.data ?? {
+    network: "tcp" as const, transport: "auto", bind: "127.0.0.1:7000", connect: "127.0.0.1:80",
+  };
+  const initial: TunnelData = {
+    ...initialValue,
+    enable_proxy_protocol: initialValue.enable_proxy_protocol ?? false,
+    access_policy: initialValue.access_policy ?? {allow_cidrs: [], deny_cidrs: []},
+    rate_limit: initialValue.rate_limit ?? {up_bytes_per_second: 0, down_bytes_per_second: 0},
   };
   const [clientID, setClientID] = useState(editor.clientId);
   const [proxyID, setProxyID] = useState(proxy?.proxy_id ?? "");
@@ -183,11 +204,81 @@ function ProxyEditor({
           <label>备注<input value={remark} onChange={(event) => setRemark(event.target.value)} /></label>
           <label>网络<select value={data.network} onChange={(event) => {
             const network = event.target.value as "tcp" | "udp";
-            setData({...data, network, transport: network === "udp" ? "smux-datagram" : "auto"});
+            setData({
+              ...data,
+              network,
+              transport: network === "udp" ? "smux-datagram" : "auto",
+              enable_proxy_protocol: network === "tcp" ? data.enable_proxy_protocol : false,
+            });
           }}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
           <label>承载<select value={data.transport} onChange={(event) => setData({...data, transport: event.target.value})}>{data.network === "tcp" ? <><option value="auto">auto</option><option value="smux">smux</option><option value="direct">direct</option></> : <option value="smux-datagram">smux-datagram</option>}</select></label>
           <label>服务端监听<input className="mono" value={data.bind} onChange={(event) => setData({...data, bind: event.target.value})} required /></label>
           <label>内网目标<input className="mono" value={data.connect} onChange={(event) => setData({...data, connect: event.target.value})} required /></label>
+          <fieldset className="form-section form-span">
+            <legend>外部访问</legend>
+            <p>服务端全局策略：允许 {globalAccess.allow_cidrs.length || "全部"}，拒绝 {globalAccess.deny_cidrs.length || "无"}</p>
+            <div className="form-grid nested">
+              <label>允许来源 CIDR
+                <textarea
+                  className="mono"
+                  placeholder="每行一个 CIDR；留空不增加限制"
+                  value={(data.access_policy?.allow_cidrs ?? []).join("\n")}
+                  onChange={(event) => setData({...data, access_policy: {
+                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
+                    allow_cidrs: cidrLines(event.target.value),
+                  }})}
+                />
+              </label>
+              <label>拒绝来源 CIDR
+                <textarea
+                  className="mono"
+                  placeholder="每行一个 CIDR"
+                  value={(data.access_policy?.deny_cidrs ?? []).join("\n")}
+                  onChange={(event) => setData({...data, access_policy: {
+                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
+                    deny_cidrs: cidrLines(event.target.value),
+                  }})}
+                />
+              </label>
+            </div>
+          </fieldset>
+          <fieldset className="form-section form-span">
+            <legend>目标来源传递</legend>
+            <label className="toggle-setting">
+              <span><strong>启用 PROXY Protocol v1</strong><small>目标服务必须显式接受 PROXY Protocol v1</small></span>
+              <span className="switch">
+                <input
+                  type="checkbox"
+                  checked={data.enable_proxy_protocol ?? false}
+                  disabled={data.network !== "tcp"}
+                  onChange={(event) => setData({...data, enable_proxy_protocol: event.target.checked})}
+                  aria-label="启用 PROXY Protocol v1"
+                />
+                <span />
+              </span>
+            </label>
+          </fieldset>
+          <fieldset className="form-section form-span">
+            <legend>连接限速</legend>
+            <div className="form-grid nested">
+              <RateInput
+                label="上行"
+                value={data.rate_limit?.up_bytes_per_second ?? 0}
+                onChange={(value) => setData({...data, rate_limit: {
+                  ...(data.rate_limit ?? {up_bytes_per_second: 0, down_bytes_per_second: 0}),
+                  up_bytes_per_second: value,
+                }})}
+              />
+              <RateInput
+                label="下行"
+                value={data.rate_limit?.down_bytes_per_second ?? 0}
+                onChange={(value) => setData({...data, rate_limit: {
+                  ...(data.rate_limit ?? {up_bytes_per_second: 0, down_bytes_per_second: 0}),
+                  down_bytes_per_second: value,
+                }})}
+              />
+            </div>
+          </fieldset>
           {validationError && <div className="form-error form-span">{validationError}</div>}
         </div>
         <div className="modal-actions">
@@ -197,4 +288,61 @@ function ProxyEditor({
       </form>
     </Dialog>
   );
+}
+
+function RateInput({label, value, onChange}: {label: string; value: number; onChange: (value: number) => void}) {
+  const [unit, setUnit] = useState(() => rateUnit(value));
+  const factor = unit === "GiB/s" ? 2 ** 30 : unit === "MiB/s" ? 2 ** 20 : 2 ** 10;
+  const unlimited = value === 0;
+  return (
+    <div className="rate-editor">
+      <label>{label}速率
+        <div className="input-with-unit">
+          <input
+            type="number"
+            min="1"
+            step="1"
+            disabled={unlimited}
+            value={unlimited ? "" : value / factor}
+            onChange={(event) => onChange(Math.round(Number(event.target.value) * factor))}
+          />
+          <select value={unit} disabled={unlimited} onChange={(event) => setUnit(event.target.value)}>
+            <option>KiB/s</option><option>MiB/s</option><option>GiB/s</option>
+          </select>
+        </div>
+      </label>
+      <label className="checkbox-row">
+        <input type="checkbox" checked={unlimited} onChange={(event) => onChange(event.target.checked ? 0 : factor)} />
+        不限速
+      </label>
+    </div>
+  );
+}
+
+function cidrLines(value: string) {
+  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+}
+
+function accessSummary(policy?: AccessPolicy) {
+  if (!policy || (!policy.allow_cidrs.length && !policy.deny_cidrs.length)) return "继承全局";
+  return `允许 ${policy.allow_cidrs.length || "全部"} · 拒绝 ${policy.deny_cidrs.length}`;
+}
+
+function rateSummary(data: TunnelData) {
+  const up = data.rate_limit?.up_bytes_per_second ?? 0;
+  const down = data.rate_limit?.down_bytes_per_second ?? 0;
+  return `↑ ${formatLimit(up)} · ↓ ${formatLimit(down)}`;
+}
+
+function formatLimit(value: number) {
+  if (!value) return "不限";
+  if (value >= 2 ** 30) return `${value / 2 ** 30} GiB/s`;
+  if (value >= 2 ** 20) return `${value / 2 ** 20} MiB/s`;
+  return `${value / 2 ** 10} KiB/s`;
+}
+
+function rateUnit(value: number) {
+  if (value >= 2 ** 30 && value % (2 ** 30) === 0) return "GiB/s";
+  if (value >= 2 ** 20 && value % (2 ** 20) === 0) return "MiB/s";
+  return "KiB/s";
 }

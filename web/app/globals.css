@@ -35,7 +35,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .login-form p, .section-heading p, .topbar p, .modal-header p { margin: 0; color: var(--muted); font-size: 13px; }
 .login-form label, .form-grid label { display: grid; gap: 7px; font-size: 13px; font-weight: 600; color: #44535a; }
 input, select { width: 100%; height: 40px; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 11px; background: white; color: var(--text); outline: none; }
+textarea { width: 100%; min-height: 104px; resize: vertical; border: 1px solid var(--line-strong); border-radius: 4px; padding: 10px 11px; background: white; color: var(--text); outline: none; }
 input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(8, 127, 117, .12); }
+textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(8, 127, 117, .12); }
 .form-error, .error-banner { border: 1px solid #e6b6b6; background: #fff2f2; color: #8e2929; border-radius: 4px; padding: 10px 12px; font-size: 13px; }
 .primary-button, .secondary-button, .command-button { min-height: 40px; border-radius: 4px; padding: 0 15px; border: 1px solid transparent; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: 600; }
 .primary-button, .command-button { background: var(--accent); color: white; }
@@ -121,7 +123,16 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .modal-header p { margin: 0; color: var(--muted); font-size: 13px; }
 .form-grid { padding: 22px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .form-grid.single { grid-template-columns: 1fr; }
+.form-grid.nested { padding: 0; margin-top: 14px; }
 .form-span { grid-column: 1 / -1; }
+.form-section { margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 5px; }
+.form-section legend { padding: 0 6px; color: var(--text); font-size: 13px; font-weight: 700; }
+.form-section > p { margin: 0; color: var(--muted); font-size: 12px; }
+.toggle-setting { display: flex !important; grid-template-columns: minmax(0, 1fr) auto !important; align-items: center; gap: 18px !important; }
+.toggle-setting > span:first-child { display: grid; gap: 4px; }
+.toggle-setting small { color: var(--muted); font-weight: 400; }
+.rate-editor { display: grid; gap: 10px; }
+.input-with-unit { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 7px; }
 .modal-actions { min-height: 68px; padding: 13px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
 .alert-modal { width: min(calc(100% - 32px), 480px); }
 .drawer { left: auto; right: 0; top: 0; transform: none; width: min(100%, 620px); max-height: none; height: 100vh; border-radius: 0; }
@@ -156,6 +167,20 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .search-control svg { position: absolute; left: 10px; top: 10px; color: var(--muted); z-index: 1; }
 .search-control input { height: 36px; padding-left: 34px; }
 .audit-filters .search-control { min-width: 260px; }
+.audit-table { min-width: 900px; table-layout: fixed; }
+.audit-table th:nth-child(1) { width: 17%; }
+.audit-table th:nth-child(2) { width: 17%; }
+.audit-table th:nth-child(3) { width: 11%; }
+.audit-table th:nth-child(4) { width: 13%; }
+.audit-table th:nth-child(5) { width: 13%; }
+.audit-table th:nth-child(6) { width: 9%; }
+.audit-table th:nth-child(7) { width: 20%; }
+.overview-client-table { min-width: 720px; table-layout: fixed; }
+.overview-client-table th:nth-child(1) { width: 26%; }
+.overview-client-table th:nth-child(2) { width: 30%; }
+.overview-client-table th:nth-child(3), .overview-client-table th:nth-child(4), .overview-client-table th:nth-child(5) { width: 11%; }
+.overview-client-table th:nth-child(6) { width: 58px; }
+.overview-client-table td:last-child { text-align: right; }
 .clickable-row { cursor: pointer; }
 .clickable-row:hover td { background: #f4f8f8; }
 .outcome { display: inline-flex; padding: 3px 7px; border-radius: 3px; background: #edf1f2; color: #596970; font-size: 10px; font-weight: 750; }
@@ -166,6 +191,7 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .pagination select { width: 100px; height: 36px; }
 .stale-banner { margin: 0 0 12px; padding: 9px 12px; border: 1px solid #e7c893; background: #fff8e9; color: #805616; border-radius: 4px; font-size: 12px; }
 .drawer-body { padding: 20px; display: grid; gap: 24px; }
+.drawer-body section > h3 { margin: 0 0 10px; font-size: 14px; }
 .detail-grid { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 0; margin: 0; border-top: 1px solid var(--line); }
 .detail-grid dt, .detail-grid dd { min-width: 0; margin: 0; padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; font-size: 12px; }
 .detail-grid dt { color: var(--muted); }
@@ -339,11 +365,19 @@ details summary { cursor: pointer; font-size: 13px; font-weight: 650; }
   .responsive-table { min-width: 0; table-layout: fixed; }
   .responsive-table th, .responsive-table td { padding-left: 10px; padding-right: 10px; overflow-wrap: anywhere; }
   .audit-table th:nth-child(3), .audit-table td:nth-child(3),
-  .audit-table th:nth-child(4), .audit-table td:nth-child(4),
-  .audit-table th:nth-child(6), .audit-table td:nth-child(6) { display: none; }
-  .audit-table th:nth-child(1) { width: 46%; }
-  .audit-table th:nth-child(2) { width: 34%; }
-  .audit-table th:nth-child(5) { width: 20%; }
+  .audit-table th:nth-child(5), .audit-table td:nth-child(5),
+  .audit-table th:nth-child(7), .audit-table td:nth-child(7) { display: none; }
+  .audit-table th:nth-child(1) { width: 30%; }
+  .audit-table th:nth-child(2) { width: 27%; }
+  .audit-table th:nth-child(4) { width: 25%; }
+  .audit-table th:nth-child(6) { width: 18%; }
+  .overview-client-table { min-width: 0; }
+  .overview-client-table th:nth-child(3), .overview-client-table td:nth-child(3),
+  .overview-client-table th:nth-child(4), .overview-client-table td:nth-child(4),
+  .overview-client-table th:nth-child(5), .overview-client-table td:nth-child(5) { display: none; }
+  .overview-client-table th:nth-child(1) { width: 38%; }
+  .overview-client-table th:nth-child(2) { width: 47%; }
+  .overview-client-table th:nth-child(6) { width: 15%; }
   .network-client-table th:nth-child(n+5), .network-client-table td:nth-child(n+5) { display: none; }
   .network-client-table th:nth-child(1) { width: 42%; }
   .history-connections-table th:nth-child(3), .history-connections-table td:nth-child(3),

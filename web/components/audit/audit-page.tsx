@@ -8,8 +8,9 @@ import { Dialog } from "@/components/ui/dialog";
 
 const eventTypes = [
   "admin_login", "admin_logout", "config_update", "client_created", "client_updated",
-  "client_token_rotated", "admin_client_disconnect", "client_session", "security",
-  "udp_drop", "database_rebuilt", "system_start", "system_stop", "config_metadata_migrated",
+  "client_token_rotated", "admin_client_disconnect", "client_session",
+  "client_agent_invalid", "database_rebuilt", "system_start", "system_stop",
+  "config_metadata_migrated",
 ];
 
 export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
@@ -78,7 +79,7 @@ export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
   return (
     <section className="section-block first">
       <div className="section-heading">
-        <div><h2>事件与审计</h2><p>管理员、配置、客户端和安全事件</p></div>
+        <div><h2>事件与审计</h2><p>管理员操作、配置变更和客户端生命周期</p></div>
         <button className="icon-button" onClick={() => void load()} title="刷新" aria-label="刷新审计"><RefreshCw size={17} /></button>
       </div>
       <div className="filter-bar audit-filters">
@@ -99,19 +100,20 @@ export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
       {error && <div className="stale-banner">{error}</div>}
       <div className="table-wrap">
         <table className="audit-table responsive-table">
-          <thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>对象</th><th>结果</th><th>摘要</th></tr></thead>
+          <thead><tr><th>时间</th><th>事件</th><th>操作者</th><th>IP</th><th>对象</th><th>结果</th><th>摘要</th></tr></thead>
           <tbody>
             {result.items.map((event) => (
               <tr key={event.id} className="clickable-row" onClick={() => void api<AuditEvent>(`/api/events/${event.id}`).then(setDetail)}>
                 <td><time title={new Date(event.occurred_at).toISOString()}>{new Date(event.occurred_at).toLocaleString()}</time></td>
                 <td><strong>{event.event_type}</strong><small>{event.category}</small></td>
                 <td>{event.actor_id || event.actor_type}</td>
+                <td className="mono audit-source-ip">{event.actor_type === "admin" ? event.source_addr || "-" : "-"}</td>
                 <td>{event.client_id || event.proxy_id || event.connection_id || "-"}</td>
                 <td><Outcome value={event.outcome} /></td>
                 <td>{event.summary || event.reason_code}</td>
               </tr>
             ))}
-            {!loading && !result.items.length && <tr><td colSpan={6}><div className="empty-inline">没有符合条件的审计事件</div></td></tr>}
+            {!loading && !result.items.length && <tr><td colSpan={7}><div className="empty-inline">没有符合条件的审计事件</div></td></tr>}
           </tbody>
         </table>
       </div>
@@ -145,9 +147,32 @@ function AuditDetail({event}: {event: AuditEvent}) {
           </div>
         </section>
       ))}
+      {event.event_type === "client_session" && <ClientSessionContext details={event.details ?? {}} />}
       <details><summary>结构化上下文</summary><pre>{JSON.stringify(event.details ?? {}, null, 2)}</pre></details>
     </div>
   );
+}
+
+function ClientSessionContext({details}: {details: Record<string, unknown>}) {
+  const agent = (details.agent ?? {}) as Record<string, unknown>;
+  return <section className="diff-block">
+    <h3>客户端环境</h3>
+    <dl className="detail-grid">
+      <dt>Agent 状态</dt><dd>{String(details.agent_status ?? "-")}</dd>
+      <dt>版本 / commit</dt><dd>{String(agent.version ?? "-")}<small className="mono">{String(agent.commit ?? "")}</small></dd>
+      <dt>运行平台</dt><dd>{String(agent.os ?? "-")} / {String(agent.arch ?? "-")}</dd>
+      <dt>主机名</dt><dd>{String(agent.hostname ?? "-")}</dd>
+      <dt>来源</dt><dd className="mono">{String(details.source_ip ?? details.source_addr ?? "-")}</dd>
+      <dt>上线 / 最后通信</dt><dd>{formatAuditTime(details.connected_at)} / {formatAuditTime(details.last_seen_at)}</dd>
+      <dt>控制 RTT</dt><dd>{Number(details.control_rtt_millis ?? 0) > 0 ? `${details.control_rtt_millis} ms` : "-"}</dd>
+      <dt>结束原因</dt><dd>{String(details.close_reason ?? "-")}</dd>
+      <dt>最终资源</dt><dd>smux {String(details.final_mux_sessions ?? "-")} · stream {String(details.final_active_streams ?? "-")}</dd>
+    </dl>
+  </section>;
+}
+
+function formatAuditTime(value: unknown) {
+  return typeof value === "number" && value > 0 ? new Date(value).toLocaleString() : "-";
 }
 
 function Outcome({value}: {value: string}) {

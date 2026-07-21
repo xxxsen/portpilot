@@ -60,12 +60,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "fault test failed:", err)
 		os.Exit(1)
 	}
-	fmt.Println("fault test passed: newest-wins, challenge/ticket replay, malformed frames, target refusal, and audit")
+	fmt.Println("fault test passed: newest-wins, challenge/ticket replay, malformed frames, target refusal, runtime logs, and audit separation")
 }
 
 func run() (runErr error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	serverLog := os.Getenv("PORTPILOT_DEV_SERVER_LOG")
+	logOffset, err := fileSize(serverLog)
+	if err != nil {
+		return fmt.Errorf("read server log offset: %w", err)
+	}
 	if err := expectInvalidAdminLogin(ctx); err != nil {
 		return err
 	}
@@ -141,9 +146,14 @@ func run() (runErr error) {
 	if err := testRefusedTarget(ctx); err != nil {
 		return err
 	}
-	if err := waitForAudit(ctx, admin, []string{
+	if err := waitForRuntimeLogs(ctx, serverLog, logOffset, []string{
 		"client_auth_failed", "mux_ticket_rejected",
 		"tcp_ticket_rejected", "udp_ticket_rejected",
+	}); err != nil {
+		return err
+	}
+	if err := ensureRuntimeEventsAbsent(ctx, admin, []string{
+		"security", "external_access_denied", "udp_drop", "proxy_protocol_write_failed",
 	}); err != nil {
 		return err
 	}
@@ -632,18 +642,45 @@ func testRefusedTarget(ctx context.Context) error {
 	return nil
 }
 
-func waitForAudit(ctx context.Context, admin *adminAPI, reasons []string) error {
+func fileSize(path string) (int64, error) {
+	info, err := os.Stat(path) //nolint:gosec // The acceptance script supplies its own server log path.
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+func waitForRuntimeLogs(
+	ctx context.Context,
+	path string,
+	offset int64,
+	reasons []string,
+) error {
 	for {
-		var payload struct {
-			Items []map[string]any `json:"items"`
+		file, err := os.Open(path) //nolint:gosec // The acceptance script supplies its own server log path.
+		if err != nil {
+			return err
 		}
-		if err := admin.getJSON(ctx, "/api/events?page=1&page_size=100", &payload); err != nil {
+		info, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return err
+		}
+		if info.Size() < offset {
+			offset = 0
+		}
+		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+			_ = file.Close()
+			return err
+		}
+		data, err := io.ReadAll(file)
+		_ = file.Close()
+		if err != nil {
 			return err
 		}
 		found := make(map[string]bool, len(reasons))
-		for _, event := range payload.Items {
-			reason, _ := event["reason"].(string)
-			if slices.Contains(reasons, reason) {
+		for _, reason := range reasons {
+			if bytes.Contains(data, []byte(`"reason": "`+reason+`"`)) {
 				found[reason] = true
 			}
 		}
@@ -658,10 +695,31 @@ func waitForAudit(ctx context.Context, admin *adminAPI, reasons []string) error 
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("missing audit reasons: %v", missing)
+			return fmt.Errorf("missing structured log reasons: %v", missing)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func ensureRuntimeEventsAbsent(
+	ctx context.Context,
+	admin *adminAPI,
+	eventTypes []string,
+) error {
+	var payload struct {
+		Items []struct {
+			EventType string `json:"event_type"`
+		} `json:"items"`
+	}
+	if err := admin.getJSON(ctx, "/api/events?page=1&page_size=100", &payload); err != nil {
+		return err
+	}
+	for _, event := range payload.Items {
+		if slices.Contains(eventTypes, event.EventType) {
+			return fmt.Errorf("runtime event %s leaked into audit API", event.EventType)
+		}
+	}
+	return nil
 }
 
 func waitForNetworkFailure(ctx context.Context, admin *adminAPI, reasonCode string) error {

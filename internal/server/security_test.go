@@ -3,7 +3,6 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestDataHandshakeLimiterRejectsExcessRequests(t *testing.T) {
@@ -30,12 +30,9 @@ func TestDataHandshakeLimiterRejectsExcessRequests(t *testing.T) {
 	}
 }
 
-func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
+func TestRejectedDataTicketWritesStructuredLogOnly(t *testing.T) {
 	t.Parallel()
-	events, err := store.Open(
-		filepath.Join(t.TempDir(), "events.db"),
-		zap.NewNop(),
-	)
+	events, err := store.Open(":memory:", zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +41,10 @@ func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
 			t.Error(err)
 		}
 	}()
+	core, observed := observer.New(zap.WarnLevel)
 	app := &App{
 		Events: events, Tickets: auth.NewTicketStore(time.Minute),
+		Logger: zap.New(core), RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
 	}
 	manager := NewTunnelManager(app)
 	if _, ok := manager.Pair(t.Context(), protocol.StreamOpen{
@@ -54,24 +53,19 @@ func TestRejectedDataTicketCreatesAuditEvent(t *testing.T) {
 	}, nil); ok {
 		t.Fatal("invalid ticket was accepted")
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		page, listErr := events.ListAudit(t.Context(), store.AuditQuery{
-			Page: 1, PageSize: 25, EventType: "security",
-		})
-		if listErr != nil {
-			t.Fatal(listErr)
-		}
-		if len(page.Items) > 0 {
-			if page.Items[0].EventType != "security" ||
-				page.Items[0].ReasonCode != "tcp_ticket_rejected" {
-				t.Fatalf("unexpected security event: %#v", page.Items[0])
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("ticket rejection audit event was not persisted")
-		}
-		time.Sleep(20 * time.Millisecond)
+	entries := observed.FilterMessage("security request rejected").All()
+	if len(entries) != 1 {
+		t.Fatalf("security log entries = %d, want 1", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	if fields["reason"] != "tcp_ticket_rejected" || fields["client_id"] != "client" {
+		t.Fatalf("unexpected security log context: %#v", fields)
+	}
+	page, err := events.ListAudit(t.Context(), store.AuditQuery{Page: 1, PageSize: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 0 {
+		t.Fatalf("runtime rejection leaked into audit events: %#v", page.Items)
 	}
 }

@@ -3,11 +3,14 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/portpilot/portpilot/internal/auth"
+	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/xtaci/smux"
 )
@@ -18,20 +21,32 @@ type outboundControl struct {
 }
 
 type Session struct {
-	ClientID string
-	ID       string
-	Epoch    uint64
+	ClientID    string
+	ID          string
+	Epoch       uint64
+	Agent       protocol.Agent
+	AgentStatus string
+	SourceAddr  string
+	SourceIP    string
+	ConnectedAt int64
 
-	app        *App
-	conn       *websocket.Conn
-	ctx        context.Context
-	cancel     context.CancelFunc
-	send       chan outboundControl
-	sequence   atomic.Uint64
-	muxMu      sync.RWMutex
-	muxes      map[string]*MuxSession
-	pendingMux map[string]struct{}
-	closed     atomic.Bool
+	app              *App
+	conn             *websocket.Conn
+	ctx              context.Context
+	cancel           context.CancelFunc
+	send             chan outboundControl
+	sequence         atomic.Uint64
+	muxMu            sync.RWMutex
+	muxes            map[string]*MuxSession
+	pendingMux       map[string]struct{}
+	closed           atomic.Bool
+	lastSeenAt       atomic.Int64
+	controlRTTMillis atomic.Int64
+	lastSnapshotAt   atomic.Int64
+	closeReason      atomic.Pointer[string]
+	offlineSnapshot  atomic.Bool
+	pingMu           sync.Mutex
+	pendingPings     map[string]time.Time
 }
 
 type MuxSession struct {
@@ -59,25 +74,37 @@ func NewSessionManager(app *App) *SessionManager {
 	}
 }
 
-func (m *SessionManager) Install(clientID, sessionID string, conn *websocket.Conn) *Session {
+func (m *SessionManager) Install(
+	clientID, sessionID, source string,
+	agent protocol.Agent,
+	agentStatus string,
+	conn *websocket.Conn,
+) *Session {
 	m.mu.Lock()
 	m.epochs[clientID]++
 	epoch := m.epochs[clientID]
 	old := m.active[clientID]
 	ctx, cancel := context.WithCancel(context.Background())
+	now := time.Now().UTC().UnixMilli()
 	session := &Session{
 		ClientID: clientID, ID: sessionID, Epoch: epoch,
+		Agent: agent, AgentStatus: agentStatus,
+		SourceAddr: source, SourceIP: source, ConnectedAt: now,
 		app: m.app, conn: conn, ctx: ctx, cancel: cancel,
 		send: make(chan outboundControl, 256), muxes: make(map[string]*MuxSession),
-		pendingMux: make(map[string]struct{}),
+		pendingMux:   make(map[string]struct{}),
+		pendingPings: make(map[string]time.Time),
 	}
+	session.lastSeenAt.Store(now)
+	session.lastSnapshotAt.Store(now)
 	m.active[clientID] = session
 	m.mu.Unlock()
 	if old != nil {
 		message, _ := protocol.NewMessage(protocol.TypeSessionReplaced, protocol.ErrorPayload{Code: protocol.ErrSessionStale})
 		_ = old.SendAndWait(message, time.Second)
-		old.Drain()
+		old.Drain("session_replaced")
 	}
+	m.app.enqueueAgentSnapshot(agentSnapshot(session, nil))
 	return session
 }
 
@@ -99,7 +126,8 @@ func (m *SessionManager) Remove(session *Session) {
 		delete(m.active, session.ClientID)
 	}
 	m.mu.Unlock()
-	session.Drain()
+	session.Drain(session.CloseReason())
+	session.persistOffline()
 }
 
 func (m *SessionManager) Epoch(clientID string) uint64 {
@@ -131,7 +159,32 @@ func (m *SessionManager) CloseAll() {
 	m.active = make(map[string]*Session)
 	m.mu.Unlock()
 	for _, session := range sessions {
-		session.Close()
+		session.Close("server_shutdown")
+	}
+}
+
+func (m *SessionManager) ReconcileClients(file config.ClientFile) {
+	enabled := make(map[string]bool, len(file.ClientConfig))
+	for _, client := range file.ClientConfig {
+		enabled[client.ClientID] = client.Enabled
+	}
+	m.mu.Lock()
+	var closeItems []*Session
+	for clientID, session := range m.active {
+		value, exists := enabled[clientID]
+		if exists && value {
+			continue
+		}
+		delete(m.active, clientID)
+		closeItems = append(closeItems, session)
+	}
+	m.mu.Unlock()
+	for _, session := range closeItems {
+		reason := "client_disabled"
+		if _, exists := enabled[session.ClientID]; !exists {
+			reason = "client_disabled"
+		}
+		session.Close(reason)
 	}
 }
 
@@ -190,10 +243,19 @@ func (s *Session) writeLoop() error {
 				return err
 			}
 		case <-ticker.C:
-			message, _ := protocol.NewMessage(protocol.TypePing, map[string]string{"time": time.Now().UTC().Format(time.RFC3339Nano)})
+			requestID, err := auth.RandomToken(12)
+			if err != nil {
+				return fmt.Errorf("create heartbeat request id: %w", err)
+			}
+			sentAt := time.Now()
+			message, _ := protocol.NewMessage(protocol.TypePing, map[string]string{
+				"time": sentAt.UTC().Format(time.RFC3339Nano),
+			})
+			message.RequestID = requestID
 			message.SessionID = s.ID
 			message.SessionEpoch = s.Epoch
 			message.Sequence = s.sequence.Add(1)
+			s.rememberPing(requestID, sentAt)
 			if err := s.conn.WriteJSON(message); err != nil {
 				return err
 			}
@@ -239,7 +301,8 @@ func (s *Session) MuxCount() int {
 	return len(s.muxes)
 }
 
-func (s *Session) Drain() {
+func (s *Session) Drain(reason string) {
+	s.setCloseReason(reason)
 	if !s.closed.CompareAndSwap(false, true) {
 		return
 	}
@@ -264,8 +327,8 @@ func (s *Session) Drain() {
 	_ = s.conn.Close()
 }
 
-func (s *Session) Close() {
-	s.Drain()
+func (s *Session) Close(reason string) {
+	s.Drain(reason)
 	s.app.Tunnels.CloseSession(s)
 	s.muxMu.RLock()
 	muxes := make([]*MuxSession, 0, len(s.muxes))
@@ -276,6 +339,7 @@ func (s *Session) Close() {
 	for _, mux := range muxes {
 		mux.Close()
 	}
+	s.persistOffline()
 }
 
 func (s *Session) Status() SessionStatus {
@@ -295,6 +359,72 @@ func (s *Session) Status() SessionStatus {
 	return SessionStatus{
 		ClientID: s.ClientID, SessionID: s.ID, Epoch: s.Epoch,
 		State: state, MuxSessions: len(s.muxes), ActiveStreams: streams,
+		Agent: s.Agent, AgentStatus: s.AgentStatus,
+		SourceAddr: s.SourceAddr, SourceIP: s.SourceIP,
+		ConnectedAt: s.ConnectedAt, LastSeenAt: s.lastSeenAt.Load(),
+		ControlRTTMillis: s.controlRTTMillis.Load(),
+		CloseReason:      s.CloseReason(),
+	}
+}
+
+func (s *Session) setCloseReason(reason string) {
+	if reason == "" {
+		reason = "remote_closed"
+	}
+	copy := reason
+	s.closeReason.CompareAndSwap(nil, &copy)
+}
+
+func (s *Session) CloseReason() string {
+	value := s.closeReason.Load()
+	if value == nil {
+		return "remote_closed"
+	}
+	return *value
+}
+
+func (s *Session) persistOffline() {
+	if !s.offlineSnapshot.CompareAndSwap(false, true) {
+		return
+	}
+	offlineAt := time.Now().UTC().UnixMilli()
+	s.app.enqueueAgentSnapshot(agentSnapshot(s, &offlineAt))
+}
+
+func (s *Session) Touch() {
+	now := time.Now().UTC().UnixMilli()
+	s.lastSeenAt.Store(now)
+	previous := s.lastSnapshotAt.Load()
+	if now-previous < int64(time.Minute/time.Millisecond) ||
+		!s.lastSnapshotAt.CompareAndSwap(previous, now) {
+		return
+	}
+	s.app.enqueueAgentSnapshot(agentSnapshot(s, nil))
+}
+
+func (s *Session) rememberPing(requestID string, sentAt time.Time) {
+	s.pingMu.Lock()
+	for id, timestamp := range s.pendingPings {
+		if sentAt.Sub(timestamp) > 2*s.app.Config.Duration(s.app.Config.Timeouts.HeartbeatTimeout) {
+			delete(s.pendingPings, id)
+		}
+	}
+	s.pendingPings[requestID] = sentAt
+	s.pingMu.Unlock()
+}
+
+func (s *Session) ObservePong(requestID string) {
+	if requestID == "" {
+		return
+	}
+	s.pingMu.Lock()
+	sentAt, ok := s.pendingPings[requestID]
+	if ok {
+		delete(s.pendingPings, requestID)
+	}
+	s.pingMu.Unlock()
+	if ok {
+		s.controlRTTMillis.Store(max(time.Since(sentAt).Milliseconds(), 1))
 	}
 }
 
@@ -334,10 +464,18 @@ func (m *MuxSession) Close() {
 }
 
 type SessionStatus struct {
-	ClientID      string `json:"client_id"`
-	SessionID     string `json:"session_id"`
-	Epoch         uint64 `json:"epoch"`
-	State         string `json:"state"`
-	MuxSessions   int    `json:"mux_sessions"`
-	ActiveStreams int64  `json:"active_streams"`
+	ClientID         string         `json:"client_id"`
+	SessionID        string         `json:"session_id"`
+	Epoch            uint64         `json:"epoch"`
+	State            string         `json:"state"`
+	MuxSessions      int            `json:"mux_sessions"`
+	ActiveStreams    int64          `json:"active_streams"`
+	Agent            protocol.Agent `json:"agent"`
+	AgentStatus      string         `json:"agent_status"`
+	SourceAddr       string         `json:"source_addr"`
+	SourceIP         string         `json:"source_ip"`
+	ConnectedAt      int64          `json:"connected_at"`
+	LastSeenAt       int64          `json:"last_seen_at"`
+	ControlRTTMillis int64          `json:"control_rtt_millis"`
+	CloseReason      string         `json:"close_reason"`
 }

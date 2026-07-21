@@ -26,6 +26,8 @@ type countingWriter struct {
 	observe func(int)
 }
 
+type WriterWrapper func(io.Writer) io.Writer
+
 func (w countingWriter) Write(data []byte) (int, error) {
 	n, err := w.writer.Write(data)
 	w.count.Add(int64(n))
@@ -65,6 +67,16 @@ func BidirectionalObserved(
 	idle time.Duration,
 	onUp, onDown func(int),
 ) Result {
+	return BidirectionalObservedWrapped(ctx, left, right, idle, onUp, onDown, nil, nil)
+}
+
+func BidirectionalObservedWrapped(
+	ctx context.Context,
+	left, right io.ReadWriteCloser,
+	idle time.Duration,
+	onUp, onDown func(int),
+	wrapUp, wrapDown WriterWrapper,
+) Result {
 	var up atomic.Int64
 	var down atomic.Int64
 	errCh := make(chan error, 2)
@@ -78,6 +90,7 @@ func BidirectionalObserved(
 		src io.ReadWriteCloser,
 		count *atomic.Int64,
 		observe func(int),
+		wrap WriterWrapper,
 	) {
 		var reader io.Reader = src
 		var writer io.Writer = dst
@@ -88,6 +101,9 @@ func BidirectionalObserved(
 			if conn, ok := dst.(net.Conn); ok {
 				writer = deadlineWriter{conn: conn, idle: idle}
 			}
+		}
+		if wrap != nil {
+			writer = wrap(writer)
 		}
 		buffer := make([]byte, 32*1024)
 		_, err := io.CopyBuffer(
@@ -100,8 +116,8 @@ func BidirectionalObserved(
 		}
 		errCh <- err
 	}
-	go copyOne(right, left, &up, onUp)
-	go copyOne(left, right, &down, onDown)
+	go copyOne(right, left, &up, onUp, wrapUp)
+	go copyOne(left, right, &down, onDown, wrapDown)
 
 	var firstErr error
 	completed := 0

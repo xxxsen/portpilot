@@ -14,11 +14,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/geoip"
+	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -79,6 +82,8 @@ func (a *App) adminMux() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", a.requireAdmin(a.requireCSRF(a.handleLogout)))
 	mux.HandleFunc("GET /api/auth/me", a.requireAdmin(a.handleMe))
 	mux.HandleFunc("GET /api/clients", a.requireAdmin(a.handleClients))
+	mux.HandleFunc("GET /api/clients/{client_id}", a.requireAdmin(a.handleClientDetail))
+	mux.HandleFunc("GET /api/access-policy", a.requireAdmin(a.handleAccessPolicy))
 	mux.HandleFunc("POST /api/clients", a.requireAdmin(a.requireCSRF(a.handleCreateClient)))
 	mux.HandleFunc("PATCH /api/clients/{client_id}", a.requireAdmin(a.requireCSRF(a.handleUpdateClient)))
 	mux.HandleFunc("POST /api/clients/{client_id}/rotate-token", a.requireAdmin(a.requireCSRF(a.handleRotateClientToken)))
@@ -266,10 +271,15 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleClients(w http.ResponseWriter, r *http.Request) {
 	statuses := make(map[string]SessionStatus)
 	for _, status := range a.Sessions.Snapshot() {
 		statuses[status.ClientID] = status
+	}
+	snapshots, err := a.Events.ListClientAgentSnapshots(r.Context())
+	if err != nil {
+		a.storeError.Store(true)
+		snapshots = map[string]store.ClientAgentSnapshot{}
 	}
 	type clientView struct {
 		ClientID      string                 `json:"client_id"`
@@ -285,6 +295,9 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 		CreatedAt     int64                  `json:"created_at"`
 		UpdatedAt     int64                  `json:"updated_at"`
 		Proxies       []config.ProxyEnvelope `json:"proxies"`
+		Agent         *protocol.Agent        `json:"agent"`
+		AgentStatus   string                 `json:"agent_status"`
+		Session       *clientSessionView     `json:"session"`
 	}
 	file := a.ConfigManager.Snapshot()
 	result := make([]clientView, 0, len(file.ClientConfig))
@@ -293,6 +306,9 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 		if !online {
 			status.Epoch = a.Sessions.Epoch(client.ClientID)
 		}
+		agent, agentStatus, sessionView := observedClient(
+			status, online, snapshots[client.ClientID],
+		)
 		state := "OFFLINE"
 		if !client.Enabled {
 			state = "DISABLED"
@@ -305,7 +321,8 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 			Epoch: status.Epoch, SessionEpoch: status.Epoch,
 			MuxSessions: status.MuxSessions, ActiveStreams: status.ActiveStreams,
 			ProxyCount: len(client.ProxyList), CreatedAt: client.CreatedAt, UpdatedAt: client.UpdatedAt,
-			Proxies: client.ProxyList,
+			Proxies: client.ProxyList, Agent: agent, AgentStatus: agentStatus,
+			Session: sessionView,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -313,9 +330,63 @@ func (a *App) handleClients(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+type clientSessionView struct {
+	SourceAddr        string `json:"source_addr"`
+	SourceIP          string `json:"source_ip"`
+	ConnectedAt       int64  `json:"connected_at"`
+	LastSeenAt        int64  `json:"last_seen_at"`
+	ControlRTTMillis  int64  `json:"control_rtt_millis"`
+	LastOfflineAt     *int64 `json:"last_offline_at,omitempty"`
+	LastOfflineReason string `json:"last_offline_reason"`
+}
+
+func observedClient(
+	status SessionStatus,
+	online bool,
+	snapshot store.ClientAgentSnapshot,
+) (*protocol.Agent, string, *clientSessionView) {
+	if online {
+		agent := status.Agent
+		var agentPointer *protocol.Agent
+		if status.AgentStatus == "available" {
+			agentPointer = &agent
+		}
+		return agentPointer, status.AgentStatus, &clientSessionView{
+			SourceAddr: status.SourceAddr, SourceIP: status.SourceIP,
+			ConnectedAt: status.ConnectedAt, LastSeenAt: status.LastSeenAt,
+			ControlRTTMillis: status.ControlRTTMillis,
+		}
+	}
+	if snapshot.ClientID == "" {
+		return nil, "unavailable", nil
+	}
+	agentStatus := snapshot.AgentStatus
+	if agentStatus == "" {
+		agentStatus = "legacy"
+	}
+	var agentPointer *protocol.Agent
+	if agentStatus == "available" && snapshot.ProtocolVersion > 0 {
+		agentStatus = "available"
+		agentPointer = &protocol.Agent{
+			Version: snapshot.AgentVersion, Commit: snapshot.AgentCommit,
+			BuildTime: snapshot.AgentBuildTime, GoVersion: snapshot.GoVersion,
+			OS: snapshot.OS, Arch: snapshot.Arch, Hostname: snapshot.Hostname,
+			StartedAt:       snapshot.ProcessStartedAt,
+			ProtocolVersion: snapshot.ProtocolVersion,
+			Capabilities:    append([]string(nil), snapshot.Capabilities...),
+		}
+	}
+	return agentPointer, agentStatus, &clientSessionView{
+		SourceAddr: snapshot.SourceAddr, SourceIP: snapshot.SourceIP,
+		ConnectedAt: snapshot.LastOnlineAt, LastSeenAt: snapshot.LastSeenAt,
+		LastOfflineAt:     snapshot.LastOfflineAt,
+		LastOfflineReason: snapshot.LastOfflineReason,
+	}
+}
+
 func (a *App) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("client_id")
-	if !a.Sessions.Kick(clientID) {
+	if !a.Sessions.Kick(clientID, "admin_disconnect") {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "client_offline"})
 		return
 	}
@@ -412,6 +483,7 @@ func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
 		"stack_inuse_bytes": resources.StackInuse, "system_memory_bytes": resources.SystemMemory,
 		"network_analytics_metrics":       analyticsMetrics,
 		"network_analytics_query_metrics": a.analytics.snapshot(),
+		"external_access_metrics":         a.access.snapshot(),
 		"geoip_metrics":                   geoIPMetrics,
 		"degraded":                        a.Degraded(),
 	})
@@ -488,7 +560,7 @@ func (a *AdminAuth) allowLogin(source string) bool {
 	return window.Count <= a.loginLimit
 }
 
-func (m *SessionManager) Kick(clientID string) bool {
+func (m *SessionManager) Kick(clientID, reason string) bool {
 	m.mu.Lock()
 	session := m.active[clientID]
 	if session != nil {
@@ -496,7 +568,7 @@ func (m *SessionManager) Kick(clientID string) bool {
 	}
 	m.mu.Unlock()
 	if session != nil {
-		session.Close()
+		session.Close(reason)
 		return true
 	}
 	return false
@@ -506,32 +578,7 @@ func (a *App) secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if !a.trustedProxy(r.RemoteAddr) {
-		return false
-	}
 	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-}
-
-func (a *App) trustedProxy(remote string) bool {
-	host, _, err := net.SplitHostPort(remote)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return a.trustedProxyIP(ip)
-}
-
-func (a *App) trustedProxyIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	for _, value := range a.Config.TrustedProxies {
-		_, network, err := net.ParseCIDR(value)
-		if err == nil && network.Contains(ip) {
-			return true
-		}
-	}
-	return false
 }
 
 func decodeJSONRequest(r *http.Request, target any) error {
@@ -569,48 +616,43 @@ func (a *App) requestSource(r *http.Request) string {
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if !a.trustedProxy(r.RemoteAddr) {
-		return host
+	fallback := host
+	if address, parseErr := accesspolicy.NormalizeIPString(host); parseErr == nil {
+		fallback = address.String()
 	}
-	forwardedHeader := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if forwardedHeader != "" {
-		values := strings.Split(forwardedHeader, ",")
-		ips := make([]net.IP, 0, len(values))
-		for _, value := range values {
-			ip := net.ParseIP(strings.TrimSpace(value))
-			if ip == nil {
-				a.recordInvalidForwardedHeader(r.Context(), host)
-				return host
-			}
-			ips = append(ips, ip)
-		}
-		for index := len(ips) - 1; index >= 0; index-- {
-			if !a.trustedProxyIP(ips[index]) || index == 0 {
-				return ips[index].String()
-			}
-		}
+	if a.Config.RealIPHeader == "" {
+		return fallback
 	}
-	realIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
-	if realIP != "" {
-		ip := net.ParseIP(realIP)
-		if ip == nil {
-			a.recordInvalidForwardedHeader(r.Context(), host)
-			return host
-		}
-		return ip.String()
+	values := r.Header.Values(a.Config.RealIPHeader)
+	if len(values) == 0 {
+		return fallback
 	}
-	return host
+	first, _, _ := strings.Cut(strings.Join(values, ","), ",")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		a.logInvalidRealIPHeader(fallback)
+		return fallback
+	}
+	address, parseErr := accesspolicy.NormalizeIPString(first)
+	if parseErr != nil {
+		a.logInvalidRealIPHeader(fallback)
+		return fallback
+	}
+	return address.String()
 }
 
-func (a *App) recordInvalidForwardedHeader(ctx context.Context, peer string) {
-	if a.Events == nil {
+func (a *App) logInvalidRealIPHeader(peer string) {
+	key := "invalid_real_ip_header\x00" + peer
+	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
 		return
 	}
-	a.writeAuditBestEffort(ctx, store.AuditEvent{
-		Category: "security", EventType: "security", Outcome: "denied",
-		ActorType: "external", SourceAddr: peer,
-		Summary: "忽略非法代理来源头", ReasonCode: "invalid_forwarded_header",
-	})
+	if a.Logger != nil {
+		a.Logger.Warn(
+			"invalid real IP header ignored",
+			zap.String("header", a.Config.RealIPHeader),
+			zap.String("socket_peer_ip", peer),
+		)
+	}
 }
 
 type adminContextKey struct{}

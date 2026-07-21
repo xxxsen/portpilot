@@ -1,9 +1,11 @@
 {
   "admin_addr": "127.0.0.1:5100",
   "server_addr": "127.0.0.1:6100",
-  "trusted_proxy_cidrs": [
-    "127.0.0.1/32"
-  ],
+  "real_ip_header": "X-Real-IP",
+  "access_policy": {
+    "allow_cidrs": [],
+    "deny_cidrs": []
+  },
   "users": [
     {
       "user_name": "admin",

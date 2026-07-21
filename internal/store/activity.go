@@ -11,34 +11,45 @@ import (
 )
 
 type NetworkConnection struct {
-	ActivityID            string `json:"activity_id"`
-	Protocol              string `json:"protocol"`
-	State                 string `json:"state"`
-	ClientID              string `json:"client_id"`
-	ClientRemark          string `json:"client_remark"`
-	ProxyID               string `json:"proxy_id"`
-	ProxyRemark           string `json:"proxy_remark"`
-	ExternalAddr          string `json:"external_addr"`
-	ExternalIP            string `json:"external_ip"`
-	ServerBind            string `json:"server_bind"`
-	TargetAddr            string `json:"target_addr"`
-	Transport             string `json:"transport"`
-	SessionEpoch          uint64 `json:"session_epoch"`
-	AcceptedAt            int64  `json:"accepted_at"`
-	ConnectedAt           *int64 `json:"connected_at,omitempty"`
-	LastActivityAt        int64  `json:"last_activity_at"`
-	ClosedAt              *int64 `json:"closed_at,omitempty"`
-	UpBytes               int64  `json:"up_bytes"`
-	DownBytes             int64  `json:"down_bytes"`
-	UpPackets             int64  `json:"up_packets"`
-	DownPackets           int64  `json:"down_packets"`
-	UpBytesPerSecond      int64  `json:"up_bytes_per_second"`
-	DownBytesPerSecond    int64  `json:"down_bytes_per_second"`
-	RateSampledAt         int64  `json:"rate_sampled_at"`
-	RateWindowMillis      int64  `json:"rate_window_millis"`
-	CloseReasonCode       string `json:"close_reason_code"`
-	CloseReason           string `json:"close_reason"`
-	AnalyticsAggregatedAt *int64 `json:"-"`
+	ActivityID              string `json:"activity_id"`
+	Protocol                string `json:"protocol"`
+	State                   string `json:"state"`
+	ClientID                string `json:"client_id"`
+	ClientRemark            string `json:"client_remark"`
+	ProxyID                 string `json:"proxy_id"`
+	ProxyRemark             string `json:"proxy_remark"`
+	ExternalAddr            string `json:"external_addr"`
+	ExternalIP              string `json:"external_ip"`
+	ServerBind              string `json:"server_bind"`
+	TargetAddr              string `json:"target_addr"`
+	Transport               string `json:"transport"`
+	SessionEpoch            uint64 `json:"session_epoch"`
+	AcceptedAt              int64  `json:"accepted_at"`
+	ConnectedAt             *int64 `json:"connected_at,omitempty"`
+	LastActivityAt          int64  `json:"last_activity_at"`
+	ClosedAt                *int64 `json:"closed_at,omitempty"`
+	UpBytes                 int64  `json:"up_bytes"`
+	DownBytes               int64  `json:"down_bytes"`
+	UpPackets               int64  `json:"up_packets"`
+	DownPackets             int64  `json:"down_packets"`
+	UpBytesPerSecond        int64  `json:"up_bytes_per_second"`
+	DownBytesPerSecond      int64  `json:"down_bytes_per_second"`
+	RateSampledAt           int64  `json:"rate_sampled_at"`
+	RateWindowMillis        int64  `json:"rate_window_millis"`
+	UpLimitBytesPerSecond   int64  `json:"up_limit_bytes_per_second"`
+	DownLimitBytesPerSecond int64  `json:"down_limit_bytes_per_second"`
+	UpThrottledMillis       int64  `json:"up_throttled_millis"`
+	DownThrottledMillis     int64  `json:"down_throttled_millis"`
+	UpRateLimitedPackets    int64  `json:"up_rate_limited_packets"`
+	DownRateLimitedPackets  int64  `json:"down_rate_limited_packets"`
+	UpRateLimitedBytes      int64  `json:"up_rate_limited_bytes"`
+	DownRateLimitedBytes    int64  `json:"down_rate_limited_bytes"`
+	ProxyProtocolEnabled    bool   `json:"proxy_protocol_enabled"`
+	ProxyProtocolVersion    int    `json:"proxy_protocol_version"`
+	ProxyProtocolHeaderSent bool   `json:"proxy_protocol_header_sent"`
+	CloseReasonCode         string `json:"close_reason_code"`
+	CloseReason             string `json:"close_reason"`
+	AnalyticsAggregatedAt   *int64 `json:"-"`
 }
 
 type NetworkSample struct {
@@ -147,7 +158,13 @@ func (s *Store) CreateNetworkConnection(ctx context.Context, connection NetworkC
 		proxy_remark, external_addr, external_ip, server_bind, target_addr, transport,
 		session_epoch, accepted_at, connected_at, last_activity_at, closed_at,
 		up_bytes, down_bytes, up_packets, down_packets, close_reason_code, close_reason
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		, up_limit_bytes_per_second, down_limit_bytes_per_second,
+		up_throttled_millis, down_throttled_millis,
+		up_rate_limited_packets, down_rate_limited_packets,
+		up_rate_limited_bytes, down_rate_limited_bytes,
+		proxy_protocol_enabled, proxy_protocol_version, proxy_protocol_header_sent
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		connection.ActivityID, connection.Protocol, connection.State, connection.ClientID,
 		connection.ClientRemark, connection.ProxyID, connection.ProxyRemark,
 		connection.ExternalAddr, connection.ExternalIP, connection.ServerBind, connection.TargetAddr,
@@ -155,6 +172,12 @@ func (s *Store) CreateNetworkConnection(ctx context.Context, connection NetworkC
 		connection.ConnectedAt, connection.LastActivityAt, connection.ClosedAt,
 		connection.UpBytes, connection.DownBytes, connection.UpPackets, connection.DownPackets,
 		connection.CloseReasonCode, connection.CloseReason,
+		connection.UpLimitBytesPerSecond, connection.DownLimitBytesPerSecond,
+		connection.UpThrottledMillis, connection.DownThrottledMillis,
+		connection.UpRateLimitedPackets, connection.DownRateLimitedPackets,
+		connection.UpRateLimitedBytes, connection.DownRateLimitedBytes,
+		connection.ProxyProtocolEnabled, connection.ProxyProtocolVersion,
+		connection.ProxyProtocolHeaderSent,
 	)
 	if err != nil {
 		s.degraded.Store(true)
@@ -190,12 +213,23 @@ func (s *Store) UpdateNetworkConnection(ctx context.Context, connection NetworkC
 	result, err := s.db.ExecContext(ctx, `UPDATE network_connections SET
 		state=?, transport=?, connected_at=?, last_activity_at=?, closed_at=?,
 		up_bytes=?, down_bytes=?, up_packets=?, down_packets=?,
-		close_reason_code=?, close_reason=?
+		close_reason_code=?, close_reason=?,
+		up_limit_bytes_per_second=?, down_limit_bytes_per_second=?,
+		up_throttled_millis=?, down_throttled_millis=?,
+		up_rate_limited_packets=?, down_rate_limited_packets=?,
+		up_rate_limited_bytes=?, down_rate_limited_bytes=?,
+		proxy_protocol_enabled=?, proxy_protocol_version=?, proxy_protocol_header_sent=?
 		WHERE activity_id=?`,
 		connection.State, connection.Transport, connection.ConnectedAt,
 		connection.LastActivityAt, connection.ClosedAt,
 		connection.UpBytes, connection.DownBytes, connection.UpPackets, connection.DownPackets,
-		connection.CloseReasonCode, connection.CloseReason, connection.ActivityID,
+		connection.CloseReasonCode, connection.CloseReason,
+		connection.UpLimitBytesPerSecond, connection.DownLimitBytesPerSecond,
+		connection.UpThrottledMillis, connection.DownThrottledMillis,
+		connection.UpRateLimitedPackets, connection.DownRateLimitedPackets,
+		connection.UpRateLimitedBytes, connection.DownRateLimitedBytes,
+		connection.ProxyProtocolEnabled, connection.ProxyProtocolVersion,
+		connection.ProxyProtocolHeaderSent, connection.ActivityID,
 	)
 	if err != nil {
 		s.degraded.Store(true)
@@ -331,6 +365,11 @@ const networkConnectionColumns = `activity_id, protocol, state, client_id, clien
 	proxy_id, proxy_remark, external_addr, external_ip, server_bind, target_addr, transport,
 	session_epoch, accepted_at, connected_at, last_activity_at, closed_at,
 	up_bytes, down_bytes, up_packets, down_packets, close_reason_code, close_reason,
+	up_limit_bytes_per_second, down_limit_bytes_per_second,
+	up_throttled_millis, down_throttled_millis,
+	up_rate_limited_packets, down_rate_limited_packets,
+	up_rate_limited_bytes, down_rate_limited_bytes,
+	proxy_protocol_enabled, proxy_protocol_version, proxy_protocol_header_sent,
 	analytics_aggregated_at`
 
 type rowScanner interface {
@@ -348,6 +387,12 @@ func scanNetworkConnection(scanner rowScanner) (NetworkConnection, error) {
 		&connection.AcceptedAt, &connectedAt, &connection.LastActivityAt, &closedAt,
 		&connection.UpBytes, &connection.DownBytes, &connection.UpPackets,
 		&connection.DownPackets, &connection.CloseReasonCode, &connection.CloseReason,
+		&connection.UpLimitBytesPerSecond, &connection.DownLimitBytesPerSecond,
+		&connection.UpThrottledMillis, &connection.DownThrottledMillis,
+		&connection.UpRateLimitedPackets, &connection.DownRateLimitedPackets,
+		&connection.UpRateLimitedBytes, &connection.DownRateLimitedBytes,
+		&connection.ProxyProtocolEnabled, &connection.ProxyProtocolVersion,
+		&connection.ProxyProtocolHeaderSent,
 		&analyticsAggregatedAt,
 	); err != nil {
 		return NetworkConnection{}, fmt.Errorf("scan network connection: %w", err)

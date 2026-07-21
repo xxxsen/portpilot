@@ -3,6 +3,15 @@ export type TunnelData = {
   transport: string;
   bind: string;
   connect: string;
+  enable_proxy_protocol?: boolean;
+  access_policy?: {
+    allow_cidrs: string[];
+    deny_cidrs: string[];
+  };
+  rate_limit?: {
+    up_bytes_per_second: number;
+    down_bytes_per_second: number;
+  };
 };
 
 export type Proxy = {
@@ -42,6 +51,32 @@ export type ClientView = {
   created_at: number;
   updated_at: number;
   proxies: Proxy[];
+  agent: ClientAgent | null;
+  agent_status: "available" | "legacy" | "invalid" | "unavailable";
+  session: ClientSessionView | null;
+};
+
+export type ClientAgent = {
+  version: string;
+  commit: string;
+  build_time: string;
+  go_version: string;
+  os: string;
+  arch: string;
+  hostname: string;
+  started_at: number;
+  protocol_version: number;
+  capabilities: string[];
+};
+
+export type ClientSessionView = {
+  source_addr: string;
+  source_ip: string;
+  connected_at: number;
+  last_seen_at: number;
+  control_rtt_millis: number;
+  last_offline_at?: number;
+  last_offline_reason: string;
 };
 
 export type ClientList = {
@@ -120,6 +155,17 @@ export type NetworkConnection = {
   down_bytes_per_second: number;
   rate_sampled_at: number;
   rate_window_millis: number;
+  up_limit_bytes_per_second: number;
+  down_limit_bytes_per_second: number;
+  up_throttled_millis: number;
+  down_throttled_millis: number;
+  up_rate_limited_packets: number;
+  down_rate_limited_packets: number;
+  up_rate_limited_bytes: number;
+  down_rate_limited_bytes: number;
+  proxy_protocol_enabled: boolean;
+  proxy_protocol_version: number;
+  proxy_protocol_header_sent: boolean;
   close_reason_code: string;
   close_reason: string;
 };

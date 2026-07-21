@@ -20,9 +20,10 @@ func TestEmbeddedMigrationsAreNamedAndDDLOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 ||
+	if len(entries) != 3 ||
 		entries[0].Name() != "0001_init.sql" ||
-		entries[1].Name() != "0002_network_history_analytics.sql" {
+		entries[1].Name() != "0002_network_history_analytics.sql" ||
+		entries[2].Name() != "0003_external_access_rate_limit_proxy_protocol_client_agent.sql" {
 		t.Fatalf("unexpected migration files: %#v", entries)
 	}
 	dml := regexp.MustCompile(`(?im)^\s*(insert|update|delete|replace|merge|select)\b`)
@@ -166,8 +167,8 @@ func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version=%d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version=%d, want 3", version)
 	}
 	var externalIP string
 	var aggregatedAt sql.NullInt64
@@ -186,6 +187,7 @@ func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
 		"network_history_ip_rollups",
 		"network_history_proxy_dimensions",
 		"network_analytics_meta",
+		"client_agent_snapshots",
 	} {
 		var found int
 		if err := upgraded.db.QueryRowContext(

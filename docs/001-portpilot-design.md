@@ -109,11 +109,11 @@ PortPilot 使用三类配置：
 | --- | --- |
 | `admin_addr` | 管理 API 和健康检查监听地址 |
 | `server_addr` | 控制、smux 和 direct 入口监听地址 |
-| `trusted_proxy_cidrs` | 允许提供真实来源信息的代理 CIDR |
+| `real_ip_header` | Admin 与客户端控制入口读取真实来源的 HTTP header；空值回退 socket peer |
 | `users` | 管理员账号和 bcrypt password hash |
 | `client_config_file` | 客户端与代理配置文件路径 |
 | `data_db` | SQLite 路径 |
-| `target_policy` | 内网目标 CIDR 和端口策略 |
+| `access_policy` | 动态代理端口的全局外部来源 CIDR allow/deny |
 | `data_plane` | transport、smux pool 和 UDP 参数 |
 | `timeouts` | 握手、心跳、建链、空闲和最长生命周期 |
 | `limits` | pending、tunnel、session、flow、消息和速率上限 |
@@ -148,7 +148,16 @@ PortPilot 使用三类配置：
             "network": "tcp",
             "transport": "auto",
             "bind": ":7000",
-            "connect": "192.168.50.11:22"
+            "connect": "192.168.50.11:22",
+            "enable_proxy_protocol": true,
+            "access_policy": {
+              "allow_cidrs": ["203.0.113.0/24"],
+              "deny_cidrs": ["203.0.113.128/25"]
+            },
+            "rate_limit": {
+              "up_bytes_per_second": 1048576,
+              "down_bytes_per_second": 4194304
+            }
           }
         },
         {
@@ -181,7 +190,11 @@ PortPilot 使用三类配置：
 - UDP transport 固定为 `smux-datagram`。
 - `bind` 和 `connect` 使用结构化 host/port 解析。
 - 代理端口在服务端范围内全局唯一，并且不能与管理和数据入口冲突。
-- `connect` 必须通过目标 CIDR 和端口策略。
+- `access_policy` 只限制连接代理端口的外部 socket 来源；全局与代理 allow 取交集，任意
+  deny 优先。
+- `rate_limit` 按每条 TCP 连接或每个 UDP flow 分别限制上行与下行 payload bytes/s，零值
+  表示不限速。
+- `enable_proxy_protocol` 缺省关闭，只允许 TCP；启用后目标必须接受 PROXY Protocol v1。
 
 配置查询 API 只能返回脱敏 token。token 轮换时，新 token 只展示一次；配置文件仍属于敏感文件。
 
@@ -216,7 +229,7 @@ PortPilot 使用三类配置：
 
 控制连接使用 `client_id + client_token` 派生的 HMAC 挑战应答，不发送明文 token：
 
-1. 客户端发送 `AUTH_INIT`，包含 `client_id`、连接角色和客户端随机数。
+1. 客户端发送 `AUTH_INIT`，包含 `client_id`、连接角色、客户端随机数和可选 Agent 信息。
 2. 服务端返回一次性随机 challenge、challenge ID 和过期时间。
 3. 双方通过 HKDF-SHA256 从 token 和 client ID 派生认证密钥。
 4. 客户端对包含协议域、client ID、角色、challenge 和 nonce 的规范字符串计算 HMAC-SHA256。
@@ -238,6 +251,11 @@ HMAC 只证明客户端持有 token，不提供加密，因此客户端到 Nginx
 - 管理员主动断开或凭据泄露处置可以立即关闭全部数据流。
 
 所有已认证控制消息都校验 `session_id` 和 `session_epoch`。
+
+新客户端在 Agent 中上报构建版本、commit、Go 版本、OS/arch、主机名、进程启动时间、协议
+版本和实际能力。服务端只在 token 鉴权完成后发布该信息；它只用于资产展示、兼容判断和审计，
+不参与授权。旧客户端可不发送 Agent。服务端 PING 使用唯一 request ID，客户端 PONG 原样
+返回，服务端以本地单调时钟计算控制 RTT。
 
 ### 4.3 数据面一次性票据
 
@@ -399,6 +417,7 @@ sequenceDiagram
     participant T as Internal Target
 
     U->>S: Connect proxy listener
+    S->>S: Normalize source and evaluate access policy
     S->>S: Create connection ID and data ticket
     S->>C: OPEN_TCP
     C->>T: Dial target
@@ -406,18 +425,22 @@ sequenceDiagram
     M->>S: Present session fields and data ticket
     S->>S: Validate and atomically consume ticket
     S-->>C: STREAM_OK
+    opt PROXY Protocol enabled
+        S->>C: PROXY v1 header
+    end
     U<<->>T: Bidirectional relay
 ```
 
 服务端接受外部连接后：
 
 1. 读取不可变 proxy 配置快照。
-2. 检查客户端状态和资源上限。
-3. 创建 pending tunnel、connection ID 和 data ticket。
-4. 通过控制连接发送目标、transport、deadline 和 ticket。
-5. 客户端先连接内网目标，再建立 smux stream 或 direct 数据连接。
-6. 服务端验证数据首帧并与外部连接配对。
-7. 配对成功后进入纯字节中继。
+2. 使用 socket `RemoteAddr` 检查全局和代理外部来源策略。
+3. 检查客户端状态和资源上限。
+4. 创建 pending tunnel、connection ID 和 data ticket。
+5. 通过控制连接发送目标、transport、deadline 和 ticket。
+6. 客户端先连接内网目标，再建立 smux stream 或 direct 数据连接。
+7. 服务端验证数据首帧并与外部连接配对。
+8. 按建链时配置写入可选 PROXY Protocol v1 header 后进入 payload 中继。
 
 ### 7.2 中继语义
 
@@ -426,8 +449,32 @@ sequenceDiagram
 - 建链、空闲和最长生命周期由服务端策略限制。
 - 目标拒绝、reset、数据连接超时和 session 丢失都必须结束对应隧道并释放资源。
 - 流量统计异步写入，不能阻塞数据路径。
+- 上下行 limiter 位于服务端 relay 层，每条连接独立，因此 smux、direct 和 fallback 语义
+  一致；限速只计算成功转发的 payload。
 
 客户端离线或没有可用数据面时，新 TCP 连接快速失败，不在服务端无限排队等待重连。
+
+### 7.3 外部来源策略
+
+全局和代理策略都使用 canonical IPv4/IPv6 CIDR。来源先去端口和 IPv6 zone，再对
+IPv4-mapped IPv6 执行 unmap。允许条件是来源不命中任意 deny，并满足每个非空 allow 列表；
+解析失败时 fail closed。TCP 在 activity、ticket 和信令创建前判定，UDP 在 flow 查找前对
+每个 datagram 判定。
+
+代理策略提交后，新请求立即使用新快照；不再允许的 pending/active TCP 和 UDP flow 以
+`source_policy_changed` 关闭，UDP 同时向客户端发送 `FLOW_CLOSE`。来源拒绝写结构化日志、
+并按 network/proxy/reason 写精确的进程聚合指标；重复日志按来源和规则限频，不写审计或
+为每次扫描创建连接明细。
+
+动态代理端口始终使用四层 socket peer，不读取 `real_ip_header`。
+
+### 7.4 PROXY Protocol v1
+
+启用时，服务端在外部 TCP accept 时冻结 socket source/destination，并生成 `PROXY TCP4` 或
+`PROXY TCP6` 文本 header。header 在 `STREAM_OK` 之后、`Activity.Connected` 和首个用户
+payload 之前完整写入已鉴权数据流；构造或写入失败关闭两端并记录
+网络活动失败状态和结构化错误日志。header 不消耗限速 token，也不计入流量、采样或历史聚合。
+开关更新只影响提交后接受的新连接，不在活跃字节流中插入或撤回 header。
 
 ## 8. UDP-over-TCP
 
@@ -447,6 +494,8 @@ PortPilot Client -- UDP --> Internal Target
 - TCP 丢包会阻塞同一底层连接上的后续 datagram。
 - 中间链路不保留原生 UDP 的丢包和乱序特征。
 - PortPilot 队列满时主动丢包并计数，不无限阻塞 UDP listener。
+- 每个 flow 有独立上下行 token bucket；token 不足只丢当前 datagram，并单独累计限速丢包
+  和字节，不阻塞共享 channel。
 
 因此该能力应明确标识为 UDP-over-TCP，而不是原生 UDP 隧道。
 
@@ -565,7 +614,8 @@ TunnelRegistry   connection/channel/flow -> Pending or Active runtime
 - 删除或禁用代理：停止接收新请求，按策略 drain 后关闭。
 - 修改 network 或 bind：先绑定新地址，成功后再切换和关闭旧地址。
 
-已经建立的 TCP tunnel 使用创建时配置快照直到关闭。已有 UDP flow 使用原目标直到 TTL；新 tunnel 和 flow 使用最新配置。
+已经建立的 TCP tunnel 保持建链时的目标、transport 和 PROXY Protocol 开关。代理来源策略
+与上下行限速会 reconcile 到活跃 TCP/UDP；已有 UDP flow 使用原目标直到 TTL。
 
 ### 9.5 原子配置更新
 
@@ -645,7 +695,9 @@ SQLite 可以保存：
 - 连接开始、结束、持续时间和关闭原因。
 - client、proxy 和脱敏来源标识。
 - 上下行字节和 datagram 统计。
-- 管理操作和安全审计。
+- 当前限速、TCP 累计等待、UDP 限速丢包和 PROXY Protocol 发送状态。
+- 客户端 Agent、控制来源和最近上线/离线快照。
+- 管理操作、配置变更、客户端身份/会话和系统生命周期审计。
 - 可重建聚合指标。
 
 SQLite 不能保存：
@@ -692,6 +744,7 @@ console 或 file 之一；日志文件的父目录由进程创建。客户端和
 - mux session、活动 stream、扩缩容和异常关闭。
 - TCP pending/active、建链延迟、transport 和关闭原因。
 - UDP channel、flow、datagram、队列水位和丢弃原因。
+- 外部来源拒绝按 network、proxy 和原因的连接数、datagram 数及字节数。
 - 鉴权失败、ticket 重放、配置 revision 和 listener reconcile。
 - goroutine、文件描述符和内存使用。
 
@@ -709,10 +762,14 @@ console 或 file 之一；日志文件的父目录由进程创建。客户端和
 - 客户端在线状态、epoch、mux 和 stream 状态。
 - 客户端备注、创建/修改时间及代理配置的查询和 revision-safe 更新。
 - TCP smux、TCP direct 和 UDP-over-TCP 代理配置。
+- 外部来源 CIDR、每连接双向限速和 TCP PROXY Protocol v1 配置。
+- 客户端 Agent、运行环境、控制来源、心跳 RTT 和最近离线原因。
+- 总览客户端状态直接展示最后心跳；点击客户端打开同一套详情 Drawer。
+- 总览客户端状态提供网络活动图标入口，并携带客户端筛选条件。
 - client token 一次性轮换和旧会话失效。
 - 主动断开客户端。
 - 整体/客户端网络活动、连接生命周期、上下行流量和详情。
-- 可筛选、分页、包含脱敏上下文和配置差异的事件与审计。
+- 可筛选、分页、展示操作者 IP、包含脱敏上下文和配置差异的事件与审计。
 - 运行时聚合指标。
 
 所有服务端写接口同时要求管理员 session 和 CSRF。配置写入使用 expected revision，冲突时由调用方刷新后重新决策，不能覆盖他人的更新。
@@ -723,13 +780,15 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 
 - 生产客户端和浏览器只通过 Nginx TLS 访问。
 - Go 服务端不加载证书或私钥。
-- 只有可信代理来源的 forwarded address 可以被使用。
+- `real_ip_header` 只用于 Admin 和客户端控制 HTTP 入口；配置后信任列表第一项，Nginx 必须
+  覆盖同名 header。缺失、空值或非法值回退规范化 `RemoteAddr`。
+- 原始 TCP/UDP 代理端口只使用 socket peer，并执行全局和代理外部来源策略。
 - 动态代理端口透明转发；业务加密由 SSH、HTTPS 等上层协议负责。
 - token、challenge、ticket 和 session 使用密码学安全随机数。
 - HMAC 使用安全散列并恒定时间比较。
 - challenge 和所有 ticket 短期有效、绑定用途、原子消费且防重放。
 - 管理端使用 bcrypt、CSRF、安全 Cookie、限流和审计。
-- 内网目标受 CIDR 与端口策略限制。
+- PROXY Protocol 来源只取外部代理 socket，不能使用 HTTP header 或客户端自报值。
 - 所有控制、认证和数据帧在内存分配前验证长度与类型。
 - 服务进程使用非 root 用户，配置文件仅允许服务账号读取。
 - secret 不进入日志、API 查询、Web 持久化存储或测试工件。

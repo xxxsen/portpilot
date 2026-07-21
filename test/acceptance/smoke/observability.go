@@ -16,20 +16,41 @@ type smokeSummary struct {
 	ActiveTunnels  int64 `json:"active_tunnels"`
 	UDPChannels    int   `json:"udp_channels"`
 	UDPFlows       int   `json:"udp_flows"`
+	ExternalAccess []struct {
+		Network     string `json:"network"`
+		ProxyID     string `json:"proxy_id"`
+		Reason      string `json:"reason"`
+		Connections uint64 `json:"connections"`
+	} `json:"external_access_metrics"`
 }
 
 type smokeConnection struct {
-	AcceptedAt  int64  `json:"accepted_at"`
-	Protocol    string `json:"protocol"`
-	ProxyID     string `json:"proxy_id"`
-	UpBytes     int64  `json:"up_bytes"`
-	DownBytes   int64  `json:"down_bytes"`
-	UpPackets   int64  `json:"up_packets"`
-	DownPackets int64  `json:"down_packets"`
+	AcceptedAt              int64  `json:"accepted_at"`
+	Protocol                string `json:"protocol"`
+	ProxyID                 string `json:"proxy_id"`
+	UpBytes                 int64  `json:"up_bytes"`
+	DownBytes               int64  `json:"down_bytes"`
+	UpPackets               int64  `json:"up_packets"`
+	DownPackets             int64  `json:"down_packets"`
+	UpLimitBytesPerSecond   int64  `json:"up_limit_bytes_per_second"`
+	DownLimitBytesPerSecond int64  `json:"down_limit_bytes_per_second"`
+	UpThrottledMillis       int64  `json:"up_throttled_millis"`
+	DownThrottledMillis     int64  `json:"down_throttled_millis"`
+	ProxyProtocolEnabled    bool   `json:"proxy_protocol_enabled"`
+	ProxyProtocolVersion    int    `json:"proxy_protocol_version"`
+	ProxyProtocolHeaderSent bool   `json:"proxy_protocol_header_sent"`
 }
 
 type analyticsTopIP struct {
 	SourceIP string `json:"source_ip"`
+}
+
+type smokeConnectionObservations struct {
+	TCPConnections       map[string]bool
+	UDPFlows             int
+	ProxyProtocol        bool
+	RateLimit            bool
+	ExternalAccessDenied bool
 }
 
 func smokeObservability(ctx context.Context, adminURL string, since time.Time) error {
@@ -48,37 +69,67 @@ func smokeObservability(ctx context.Context, adminURL string, since time.Time) e
 		if err := smokeGetJSON(ctx, client, adminURL+"/api/network/connections?page=1&page_size=100", &payload); err != nil {
 			return err
 		}
-		tcpConnections := map[string]bool{}
-		udpFlows := 0
-		for _, connection := range payload.Items {
-			if connection.AcceptedAt < since.UnixMilli() {
-				continue
-			}
-			if connection.Protocol == "tcp" && connection.UpBytes > 0 && connection.DownBytes > 0 {
-				tcpConnections[connection.ProxyID] = true
-			}
-			if connection.Protocol == "udp" &&
-				connection.UpBytes > 0 && connection.DownBytes > 0 &&
-				connection.UpPackets > 0 && connection.DownPackets > 0 {
-				udpFlows++
-			}
-		}
+		observed := observeSmokeConnections(payload.Items, summary, since)
 		if summary.PendingTunnels == 0 && summary.ActiveTunnels == 0 &&
 			summary.UDPChannels >= 2 && summary.UDPFlows == 0 &&
-			tcpConnections["dev-tcp-echo"] && tcpConnections["dev-tcp-direct"] &&
-			udpFlows >= 2 {
+			observed.TCPConnections["dev-tcp-echo"] &&
+			observed.TCPConnections["dev-tcp-direct"] &&
+			observed.ProxyProtocol && observed.RateLimit &&
+			observed.ExternalAccessDenied && observed.UDPFlows >= 2 {
 			return smokeAnalytics(ctx, client, adminURL)
 		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf(
-				"observability did not converge: pending=%d active=%d udp_channels=%d udp_flows=%d tcp_connections=%v observed_udp_flows=%d",
+				"observability did not converge: pending=%d active=%d udp_channels=%d udp_flows=%d tcp_connections=%v proxy_protocol=%t rate_limit=%t access_denied=%t observed_udp_flows=%d",
 				summary.PendingTunnels, summary.ActiveTunnels,
-				summary.UDPChannels, summary.UDPFlows, tcpConnections, udpFlows,
+				summary.UDPChannels, summary.UDPFlows, observed.TCPConnections,
+				observed.ProxyProtocol, observed.RateLimit,
+				observed.ExternalAccessDenied, observed.UDPFlows,
 			)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func observeSmokeConnections(
+	connections []smokeConnection,
+	summary smokeSummary,
+	since time.Time,
+) smokeConnectionObservations {
+	result := smokeConnectionObservations{TCPConnections: make(map[string]bool)}
+	for _, connection := range connections {
+		if connection.AcceptedAt < since.UnixMilli() {
+			continue
+		}
+		if connection.Protocol == "tcp" && connection.UpBytes > 0 && connection.DownBytes > 0 {
+			result.TCPConnections[connection.ProxyID] = true
+		}
+		if connection.ProxyID == "dev-tcp-proxy-protocol" &&
+			connection.ProxyProtocolEnabled &&
+			connection.ProxyProtocolVersion == 1 &&
+			connection.ProxyProtocolHeaderSent {
+			result.ProxyProtocol = true
+		}
+		if connection.ProxyID == "dev-tcp-rate-limit" &&
+			connection.UpLimitBytesPerSecond == 65536 &&
+			connection.DownLimitBytesPerSecond == 65536 &&
+			connection.UpThrottledMillis+connection.DownThrottledMillis > 0 {
+			result.RateLimit = true
+		}
+		if connection.Protocol == "udp" &&
+			connection.UpBytes > 0 && connection.DownBytes > 0 &&
+			connection.UpPackets > 0 && connection.DownPackets > 0 {
+			result.UDPFlows++
+		}
+	}
+	for _, metric := range summary.ExternalAccess {
+		if metric.Network == "tcp" && metric.ProxyID == "dev-tcp-echo" &&
+			metric.Reason == "proxy_deny" && metric.Connections > 0 {
+			result.ExternalAccessDenied = true
+		}
+	}
+	return result
 }
 
 func smokeAnalytics(ctx context.Context, client *http.Client, adminURL string) error {

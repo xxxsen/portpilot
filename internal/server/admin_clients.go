@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +74,40 @@ func (a *App) handleCreateClient(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleClientDetail(w http.ResponseWriter, r *http.Request) {
+	clientID := r.PathValue("client_id")
+	file := a.ConfigManager.Snapshot()
+	client := findClient(file, clientID)
+	if client.ClientID == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "client_not_found"})
+		return
+	}
+	status := SessionStatus{ClientID: clientID, Epoch: a.Sessions.Epoch(clientID)}
+	online := false
+	if current := a.Sessions.Current(clientID); current != nil {
+		status = current.Status()
+		online = true
+	}
+	snapshot, err := a.Events.ClientAgentSnapshot(r.Context(), clientID)
+	if errors.Is(err, sql.ErrNoRows) {
+		snapshot = store.ClientAgentSnapshot{}
+	} else if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "event_store_unavailable",
+		})
+		return
+	}
+	agent, agentStatus, session := observedClient(status, online, snapshot)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_id": client.ClientID, "remark": client.Remark,
+		"enabled": client.Enabled, "online": online,
+		"created_at": client.CreatedAt, "updated_at": client.UpdatedAt,
+		"agent": agent, "agent_status": agentStatus, "session": session,
+		"session_epoch": status.Epoch, "mux_sessions": status.MuxSessions,
+		"active_streams": status.ActiveStreams, "proxies": client.ProxyList,
+	})
+}
+
 func (a *App) handleUpdateClient(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ExpectedRevision uint64 `json:"expected_revision"`
@@ -141,7 +176,7 @@ func (a *App) handleRotateClientToken(w http.ResponseWriter, r *http.Request) {
 			After:  map[string]any{"token_configured": true},
 		}},
 		afterCommit: func() map[string]any {
-			sessionClosed = a.Sessions.Kick(clientID)
+			sessionClosed = a.Sessions.Kick(clientID, "token_rotated")
 			return map[string]any{"session_closed": sessionClosed}
 		},
 	})
@@ -204,6 +239,8 @@ func (a *App) commitConfigMutation(
 		})
 		return config.ClientFile{}, false
 	}
+	a.Sessions.ReconcileClients(updated)
+	a.Tunnels.Reconcile()
 	a.UDP.Reconcile()
 	var details map[string]any
 	if mutation.afterCommit != nil {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/portpilot/portpilot/internal/store"
+	"go.uber.org/zap"
 )
 
 func (a *App) allowDataRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -19,13 +19,21 @@ func (a *App) allowDataRequest(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func (a *App) recordSecurity(ctx context.Context, clientID, reason string, metadata map[string]any) {
+func (a *App) recordSecurity(_ context.Context, clientID, reason string, metadata map[string]any) {
 	source, _ := metadata["source"].(string)
 	delete(metadata, "source")
-	a.writeAuditBestEffort(ctx, store.AuditEvent{
-		Category: "security", EventType: "security", Outcome: "denied",
-		ActorType: "external", SourceAddr: source, ClientID: clientID,
-		Summary: "安全策略拒绝请求", ReasonCode: reason, Reason: reason,
-		Details: metadata,
-	})
+	key := "security\x00" + reason + "\x00" + clientID + "\x00" + source
+	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
+		return
+	}
+	if a.Logger == nil {
+		return
+	}
+	a.Logger.Warn(
+		"security request rejected",
+		zap.String("reason", reason),
+		zap.String("client_id", clientID),
+		zap.String("source_ip", source),
+		zap.Any("context", metadata),
+	)
 }

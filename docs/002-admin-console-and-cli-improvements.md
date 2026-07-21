@@ -12,7 +12,8 @@
 - 客户端与代理配置文件是配置事实来源，SQLite 始终可丢弃。
 - Go 服务端不处理 TLS；管理 API 和控制/数据入口由部署侧 Nginx 提供 TLS。
 - 管理员、客户端和数据 ticket 使用相互独立的认证域。
-- 正常代理流量进入“网络活动”，管理和安全操作进入“事件与审计”。
+- 正常代理流量进入“网络活动”；运行态拒绝和转发异常进入结构化日志，管理操作、配置变更、
+  客户端身份/生命周期和系统生命周期进入“事件与审计”。
 - Web 不使用浏览器原生 `alert`、`confirm` 或 `prompt`。
 
 ## 2. 客户端配置元数据
@@ -64,9 +65,11 @@
 登录成功、失败和限流拒绝都写入审计。审计包含规范化用户名、来源、截断后的 User-Agent、
 所选 TTL、结果和原因，不包含密码、password hash、Cookie 或 CSRF secret。
 
-所有管理写接口同时要求有效管理员会话和 CSRF token。只有请求 socket 来源属于
-`trusted_proxy_cidrs` 时，服务端才从右向左解析 `X-Forwarded-For`；默认不信任 forwarded
-来源。
+所有管理写接口同时要求有效管理员会话和 CSRF token。服务端主配置的 `real_ip_header`
+为空时使用规范化 socket `RemoteAddr`；非空时读取同名 header 的第一个逗号分隔 IP，空值或
+非法值回退 socket peer。该规则同样用于客户端控制 WebSocket，生产 Nginx 必须以
+`$remote_addr` 覆盖同名 header。非法 header 写限频结构化警告日志，不进入审计。
+动态 TCP/UDP 代理 listener 不读取 HTTP header。
 
 ## 4. 客户端和代理管理
 
@@ -74,7 +77,8 @@
 
 | API | 用途 |
 | --- | --- |
-| `GET /api/clients` | 查询备注、ID、启停、在线、mux、代理数及创建/修改时间 |
+| `GET /api/clients` | 查询备注、ID、启停、在线、Agent、控制会话、mux、代理数及配置时间 |
+| `GET /api/clients/{client_id}` | 查询完整 Agent、能力、来源、心跳 RTT 和最近离线信息 |
 | `POST /api/clients` | 创建客户端并返回一次性 token |
 | `PATCH /api/clients/{client_id}` | 修改备注和启停状态 |
 | `POST /api/clients/{client_id}/rotate-token` | 轮换 token 并关闭旧控制/数据会话 |
@@ -91,6 +95,17 @@ SQLite。
 客户端时保存按钮不可用。代理启停继续通过 revision-safe 配置写入；删除和 token 轮换使用
 自绘确认窗体。
 
+代理编辑器提供三个稳定配置区：
+
+- 外部访问：代理级 canonical CIDR allow/deny，并只读展示服务端全局策略。
+- 目标来源传递：TCP 可开启 PROXY Protocol v1；UDP 固定关闭。
+- 连接限速：上行、下行分别配置不限速或 KiB/s、MiB/s、GiB/s。
+
+代理列表展示有效来源策略、PROXY Protocol 和双向限速摘要。客户端列表展示版本、OS/arch
+和最后通信，详情 Drawer 展示完整 Agent、capabilities、控制来源、epoch、RTT 与离线原因。
+总览的客户端状态同时展示最后心跳；点击任意客户端直接打开同一详情 Drawer。每行末尾提供
+网络活动图标入口，跳转后自动进入客户端视图并按对应 `client_id` 筛选。
+
 ## 5. 事件与审计
 
 “事件与审计”回答谁在何时对什么执行了什么操作，以及结果和原因。主要事件包括：
@@ -99,15 +114,16 @@ SQLite。
 - 客户端创建、修改、token 轮换和主动断开；
 - 配置更新及客户端/代理实体差异；
 - 客户端 session 生命周期；
-- challenge、ticket、epoch、帧和 UDP 异常等安全拒绝；
+- 客户端 Agent 信息非法；
 - 数据库重建、配置元数据补全和服务启停。
 
-正常 TCP 连接和 UDP flow 不写逐连接审计，正常 UDP datagram 也不写逐包审计。它们由网络
-活动记录；只有拒绝、解码失败、超限等异常写安全审计。
+外部来源策略拒绝、UDP 丢包、PROXY Protocol 写入失败以及 challenge、ticket、epoch、帧、
+握手限流等运行态安全拒绝只写结构化日志，不进入审计。高频日志按稳定维度限频；外部来源
+拒绝仍保留精确聚合指标，连接级失败仍进入“网络活动”。正常 payload 不写日志或审计。
 
 ### 5.1 数据模型
 
-`audit_events` 保存事件摘要、时间、分类、结果、actor、来源、客户端/代理/连接关联、
+`audit_events` 保存事件摘要、时间、分类、结果、actor、操作者来源 IP、客户端/代理/连接关联、
 reason code 和脱敏结构化上下文。`audit_config_changes` 保存配置事件的实体级
 create/update/delete 以及脱敏 before/after。
 
@@ -129,8 +145,9 @@ GET /api/events/{event_id}
 `date_from <= occurred_at < date_to` 的半开区间。列表按时间和 ID 稳定倒序；详情返回完整
 脱敏上下文和配置差异。
 
-Web 提供搜索、分类、事件、结果、日期、分页和详情 Drawer。“事件与审计”固定为导航最后
-一项。
+Web 提供搜索、分类、事件、结果、日期、分页和详情 Drawer。列表单独展示 IP 列；管理员主动
+触发的登录、配置和客户端管理事件显示规范化操作者 IP，非管理员事件显示 `-`。“事件与审计”
+固定为导航最后一项。
 
 ## 6. 网络活动
 
@@ -144,6 +161,16 @@ Web 提供搜索、分类、事件、结果、日期、分页和详情 Drawer。
 
 活动状态为 `accepted`、`connecting`、`active`、`closing`、`closed`、`failed` 或
 `interrupted`。
+
+连接模型同时保存建链时或当前的限速与 PROXY Protocol 状态：
+
+- `up/down_limit_bytes_per_second`；
+- TCP `up/down_throttled_millis`；
+- UDP `up/down_rate_limited_packets/bytes`；
+- `proxy_protocol_enabled/version/header_sent`。
+
+实时连接在当前速率旁显示配置上限；详情显示 TCP 累计限速等待、UDP 限速丢包和 PROXY
+Protocol header 状态。正常流量和历史 Top K 只统计成功转发的 payload。
 
 ### 6.1 实时和持久化
 
@@ -235,6 +262,10 @@ migration。SQLite 被手动删除后也会从 migrations 重建。两种情况�
 
 健康接口公开 `database`、`audit_writer`、`activity_writer` 和 `migration_version`，不公开
 数据库路径、SQL 或 secret。
+
+`client_agent_snapshots` 只保存每个 client ID 最近一次经过鉴权的 Agent 与控制会话快照。
+在线值以内存 session 为准；last seen 最多每 60 秒异步落库一次，离线时强制写最终时间和
+归一原因。SQLite 删除后客户端重连会自动重建快照，不影响身份、代理配置或 listener。
 
 ## 8. Cobra 命令行
 

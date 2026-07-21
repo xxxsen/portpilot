@@ -76,6 +76,20 @@ type AuthInit struct {
 	ClientID    string `json:"client_id"`
 	Role        string `json:"role"`
 	ClientNonce string `json:"client_nonce"`
+	Agent       *Agent `json:"agent,omitempty"`
+}
+
+type Agent struct {
+	Version         string   `json:"version"`
+	Commit          string   `json:"commit"`
+	BuildTime       string   `json:"build_time"`
+	GoVersion       string   `json:"go_version"`
+	OS              string   `json:"os"`
+	Arch            string   `json:"arch"`
+	Hostname        string   `json:"hostname"`
+	StartedAt       int64    `json:"started_at"`
+	ProtocolVersion int      `json:"protocol_version"`
+	Capabilities    []string `json:"capabilities"`
 }
 
 type AuthChallenge struct {

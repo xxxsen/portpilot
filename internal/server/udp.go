@@ -14,7 +14,7 @@ import (
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/protocol"
-	"github.com/portpilot/portpilot/internal/store"
+	"github.com/portpilot/portpilot/internal/ratelimit"
 	"go.uber.org/zap"
 )
 
@@ -52,6 +52,7 @@ type udpFlow struct {
 	ChannelID  string
 	LastActive atomic.Int64
 	Activity   *activity.Handle
+	Limits     *ratelimit.Pair
 }
 
 type UDPManager struct {
@@ -241,68 +242,36 @@ func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn,
 	}
 	sourceKey := sourceFlowKey(runtime.ClientID, runtime.Proxy.ProxyID, session.Epoch, source.String())
 	m.mu.Lock()
-	flow := m.bySource[sourceKey]
-	created := false
+	flow, created := m.findOrCreateFlowLocked(runtime, listener, source, sourceKey, session)
 	if flow == nil {
-		if m.flowCountLocked(runtime.Proxy.ProxyID, session.Epoch) >= m.app.Config.DataPlane.UDP.MaxFlowsPerProxy ||
-			len(m.byID) >= m.app.Config.Limits.MaxUDPFlowsTotal {
-			m.mu.Unlock()
-			m.recordDrop(runtime, source, len(data), "flow_limit")
-			return
-		}
-		flow = &udpFlow{
-			ID: m.nextFlow.Add(1), ProxyID: runtime.Proxy.ProxyID, ClientID: runtime.ClientID,
-			SessionID: session.ID, Connect: runtime.Data.Connect, Epoch: session.Epoch,
-			Source: cloneUDPAddr(source), Listener: listener,
-		}
-		m.bySource[sourceKey] = flow
-		m.byID[flowIDKey(flow.ProxyID, flow.Epoch, flow.ID)] = flow
-		created = true
+		m.mu.Unlock()
+		m.recordDrop(runtime, source, len(data), "flow_limit")
+		return
 	}
-	channel := m.channels[flow.ProxyID][flow.ChannelID]
-	if channel == nil || channel.closed.Load() || channel.ClientID != runtime.ClientID || channel.SessionID != session.ID ||
-		channel.Epoch != session.Epoch || channel.Connect != flow.Connect {
-		available := make([]*UDPChannel, 0, len(m.channels[flow.ProxyID]))
-		for _, candidate := range m.channels[flow.ProxyID] {
-			if candidate.ClientID == runtime.ClientID && candidate.SessionID == session.ID &&
-				candidate.Epoch == session.Epoch && candidate.Connect == flow.Connect && !candidate.closed.Load() {
-				available = append(available, candidate)
-			}
-		}
-		if len(available) == 0 {
-			if created {
-				delete(m.bySource, sourceKey)
-				delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
-			}
-			m.mu.Unlock()
-			m.recordDrop(runtime, source, len(data), "no_udp_channel")
-			return
-		}
-		channel = available[hashSource(sourceKey)%uint64(len(available))]
-		flow.ChannelID = channel.ID
+	channel := m.channelForFlowLocked(flow, runtime, session, sourceKey)
+	if channel == nil {
+		m.removeNewFlowLocked(flow, sourceKey, created)
+		m.mu.Unlock()
+		m.recordDrop(runtime, source, len(data), "no_udp_channel")
+		return
 	}
-	if created && m.app.Activity != nil {
-		activityHandle, err := m.app.Activity.Start(activity.Start{
-			Protocol: "udp", ClientID: runtime.ClientID, ClientRemark: runtime.ClientRemark,
-			ProxyID: runtime.Proxy.ProxyID, ProxyRemark: runtime.Proxy.Remark,
-			ExternalAddr: source.String(), ServerBind: listener.LocalAddr().String(),
-			TargetAddr: runtime.Data.Connect, Transport: "smux",
-			SessionEpoch: session.Epoch,
-		})
-		if err != nil {
-			delete(m.bySource, sourceKey)
-			delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
-			m.mu.Unlock()
-			m.recordDrop(runtime, source, len(data), "network_activity_limit")
-			return
-		}
-		flow.Activity = activityHandle
-		flow.Activity.Connected()
+	if created && !m.startFlowActivityLocked(flow, runtime, listener, source, session) {
+		m.removeNewFlowLocked(flow, sourceKey, true)
+		m.mu.Unlock()
+		m.recordDrop(runtime, source, len(data), "network_activity_limit")
+		return
 	}
 	flow.LastActive.Store(time.Now().UnixNano())
 	frame := protocol.UDPFrame{
 		Type: protocol.UDPTypeDataToClient, FlowID: flow.ID,
 		Addr: flow.Source, Data: data,
+	}
+	if !flow.Limits.Up.AllowN(len(data)) {
+		if flow.Activity != nil {
+			flow.Activity.AddUpRateLimited(len(data))
+		}
+		m.mu.Unlock()
+		return
 	}
 	m.mu.Unlock()
 	select {
@@ -313,6 +282,96 @@ func (m *UDPManager) HandleDatagram(runtime ProxyRuntime, listener *net.UDPConn,
 	default:
 		m.recordDrop(runtime, source, len(data), "queue_full")
 	}
+}
+
+func (m *UDPManager) findOrCreateFlowLocked(
+	runtime ProxyRuntime,
+	listener *net.UDPConn,
+	source *net.UDPAddr,
+	sourceKey string,
+	session *Session,
+) (*udpFlow, bool) {
+	if flow := m.bySource[sourceKey]; flow != nil {
+		return flow, false
+	}
+	if m.flowCountLocked(runtime.Proxy.ProxyID, session.Epoch) >= m.app.Config.DataPlane.UDP.MaxFlowsPerProxy ||
+		len(m.byID) >= m.app.Config.Limits.MaxUDPFlowsTotal {
+		return nil, false
+	}
+	flow := &udpFlow{
+		ID: m.nextFlow.Add(1), ProxyID: runtime.Proxy.ProxyID, ClientID: runtime.ClientID,
+		SessionID: session.ID, Connect: runtime.Data.Connect, Epoch: session.Epoch,
+		Source: cloneUDPAddr(source), Listener: listener,
+		Limits: ratelimit.NewPair(
+			runtime.Data.RateLimit.UpBytesPerSecond,
+			runtime.Data.RateLimit.DownBytesPerSecond,
+			true, m.app.Config.DataPlane.UDP.MaxDatagramSize,
+		),
+	}
+	m.bySource[sourceKey] = flow
+	m.byID[flowIDKey(flow.ProxyID, flow.Epoch, flow.ID)] = flow
+	return flow, true
+}
+
+func (m *UDPManager) channelForFlowLocked(
+	flow *udpFlow,
+	runtime ProxyRuntime,
+	session *Session,
+	sourceKey string,
+) *UDPChannel {
+	channel := m.channels[flow.ProxyID][flow.ChannelID]
+	if channel != nil && !channel.closed.Load() && channel.ClientID == runtime.ClientID &&
+		channel.SessionID == session.ID && channel.Epoch == session.Epoch && channel.Connect == flow.Connect {
+		return channel
+	}
+	available := make([]*UDPChannel, 0, len(m.channels[flow.ProxyID]))
+	for _, candidate := range m.channels[flow.ProxyID] {
+		if candidate.ClientID == runtime.ClientID && candidate.SessionID == session.ID &&
+			candidate.Epoch == session.Epoch && candidate.Connect == flow.Connect && !candidate.closed.Load() {
+			available = append(available, candidate)
+		}
+	}
+	if len(available) == 0 {
+		return nil
+	}
+	channel = available[hashSource(sourceKey)%uint64(len(available))]
+	flow.ChannelID = channel.ID
+	return channel
+}
+
+func (m *UDPManager) startFlowActivityLocked(
+	flow *udpFlow,
+	runtime ProxyRuntime,
+	listener *net.UDPConn,
+	source *net.UDPAddr,
+	session *Session,
+) bool {
+	if m.app.Activity == nil {
+		return true
+	}
+	activityHandle, err := m.app.Activity.Start(activity.Start{
+		Protocol: "udp", ClientID: runtime.ClientID, ClientRemark: runtime.ClientRemark,
+		ProxyID: runtime.Proxy.ProxyID, ProxyRemark: runtime.Proxy.Remark,
+		ExternalAddr: source.String(), ServerBind: listener.LocalAddr().String(),
+		TargetAddr: runtime.Data.Connect, Transport: "smux",
+		SessionEpoch:            session.Epoch,
+		UpLimitBytesPerSecond:   runtime.Data.RateLimit.UpBytesPerSecond,
+		DownLimitBytesPerSecond: runtime.Data.RateLimit.DownBytesPerSecond,
+	})
+	if err != nil {
+		return false
+	}
+	flow.Activity = activityHandle
+	flow.Activity.Connected()
+	return true
+}
+
+func (m *UDPManager) removeNewFlowLocked(flow *udpFlow, sourceKey string, created bool) {
+	if !created {
+		return
+	}
+	delete(m.bySource, sourceKey)
+	delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
 }
 
 func (c *UDPChannel) writeLoop() {
@@ -340,6 +399,12 @@ func (m *UDPManager) writeResponse(channel *UDPChannel, frame protocol.UDPFrame)
 	if flow == nil || flow.Listener == nil {
 		return
 	}
+	if !flow.Limits.Down.AllowN(len(frame.Data)) {
+		if flow.Activity != nil {
+			flow.Activity.AddDownRateLimited(len(frame.Data))
+		}
+		return
+	}
 	if _, err := flow.Listener.WriteToUDP(frame.Data, flow.Source); err == nil {
 		flow.LastActive.Store(time.Now().UnixNano())
 		if flow.Activity != nil {
@@ -349,10 +414,70 @@ func (m *UDPManager) writeResponse(channel *UDPChannel, frame protocol.UDPFrame)
 }
 
 func (m *UDPManager) Reconcile() {
+	m.reconcileFlows()
 	for _, status := range m.app.Sessions.Snapshot() {
 		m.EnsureChannels(m.app.Sessions.Current(status.ClientID))
 	}
 	m.cleanupStaleChannels()
+}
+
+func (m *UDPManager) reconcileFlows() {
+	runtimes := make(map[string]ProxyRuntime)
+	for _, runtime := range m.app.Listeners.Snapshot() {
+		if runtime.Data.Network == "udp" {
+			runtimes[runtime.Proxy.ProxyID] = runtime
+		}
+	}
+	maxDatagram := m.app.Config.DataPlane.UDP.MaxDatagramSize
+	type removedFlow struct {
+		flow    *udpFlow
+		channel *UDPChannel
+	}
+	var removed []removedFlow
+	m.mu.Lock()
+	for key, flow := range m.byID {
+		runtime, ok := runtimes[flow.ProxyID]
+		allowed := ok
+		if allowed {
+			allowed, _ = m.app.allowExternal(runtime, flow.Source)
+		}
+		if !allowed {
+			delete(m.byID, key)
+			delete(m.bySource, sourceFlowKey(
+				flow.ClientID, flow.ProxyID, flow.Epoch, flow.Source.String(),
+			))
+			removed = append(removed, removedFlow{
+				flow: flow, channel: m.channels[flow.ProxyID][flow.ChannelID],
+			})
+			continue
+		}
+		_ = flow.Limits.Up.Update(
+			runtime.Data.RateLimit.UpBytesPerSecond, true, maxDatagram,
+		)
+		_ = flow.Limits.Down.Update(
+			runtime.Data.RateLimit.DownBytesPerSecond, true, maxDatagram,
+		)
+		if flow.Activity != nil {
+			flow.Activity.SetRateLimits(
+				runtime.Data.RateLimit.UpBytesPerSecond,
+				runtime.Data.RateLimit.DownBytesPerSecond,
+			)
+		}
+	}
+	m.mu.Unlock()
+	for _, item := range removed {
+		if item.channel != nil && !item.channel.closed.Load() {
+			select {
+			case item.channel.send <- protocol.UDPFrame{
+				Type: protocol.UDPTypeFlowClose, FlowID: item.flow.ID,
+			}:
+			default:
+			}
+		}
+		if item.flow.Activity != nil {
+			item.flow.Activity.Close("source_policy_changed", "external source no longer allowed")
+		}
+	}
 }
 
 func (m *UDPManager) cleanupStaleChannels() {
@@ -520,13 +645,21 @@ func (m *UDPManager) recordDrop(runtime ProxyRuntime, source *net.UDPAddr, bytes
 	if source != nil {
 		sourceAddr = source.String()
 	}
-	m.app.writeAuditBestEffort(context.Background(), store.AuditEvent{
-		Category: "security", EventType: "udp_drop", Outcome: "denied",
-		ActorType: "external", SourceAddr: sourceAddr,
-		ClientID: runtime.ClientID, ProxyID: runtime.Proxy.ProxyID,
-		Summary: "UDP 数据报被丢弃", ReasonCode: reason, Reason: reason,
-		Details: map[string]any{"datagram_bytes": bytes},
-	})
+	key := "udp_drop\x00" + runtime.ClientID + "\x00" + runtime.Proxy.ProxyID +
+		"\x00" + sourceAddr + "\x00" + reason
+	if m.app.RuntimeLogLimiter != nil && !m.app.RuntimeLogLimiter.Allow(key) {
+		return
+	}
+	if m.app.Logger != nil {
+		m.app.Logger.Warn(
+			"UDP datagram dropped",
+			zap.String("reason", reason),
+			zap.String("client_id", runtime.ClientID),
+			zap.String("proxy_id", runtime.Proxy.ProxyID),
+			zap.String("source_addr", sourceAddr),
+			zap.Int("datagram_bytes", bytes),
+		)
+	}
 }
 
 func (c *UDPChannel) Close() {

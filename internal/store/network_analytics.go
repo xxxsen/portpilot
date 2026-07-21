@@ -404,12 +404,23 @@ func (s *Store) FinalizeNetworkConnectionAndAggregate(
 	result, err := tx.ExecContext(ctx, `UPDATE network_connections SET
 		state=?, transport=?, connected_at=?, last_activity_at=?, closed_at=?,
 		external_ip=?, up_bytes=?, down_bytes=?, up_packets=?, down_packets=?,
-		close_reason_code=?, close_reason=?
+		close_reason_code=?, close_reason=?,
+		up_limit_bytes_per_second=?, down_limit_bytes_per_second=?,
+		up_throttled_millis=?, down_throttled_millis=?,
+		up_rate_limited_packets=?, down_rate_limited_packets=?,
+		up_rate_limited_bytes=?, down_rate_limited_bytes=?,
+		proxy_protocol_enabled=?, proxy_protocol_version=?, proxy_protocol_header_sent=?
 		WHERE activity_id=?`,
 		connection.State, connection.Transport, connection.ConnectedAt,
 		connection.LastActivityAt, connection.ClosedAt, connection.ExternalIP,
 		connection.UpBytes, connection.DownBytes, connection.UpPackets, connection.DownPackets,
-		connection.CloseReasonCode, connection.CloseReason, connection.ActivityID,
+		connection.CloseReasonCode, connection.CloseReason,
+		connection.UpLimitBytesPerSecond, connection.DownLimitBytesPerSecond,
+		connection.UpThrottledMillis, connection.DownThrottledMillis,
+		connection.UpRateLimitedPackets, connection.DownRateLimitedPackets,
+		connection.UpRateLimitedBytes, connection.DownRateLimitedBytes,
+		connection.ProxyProtocolEnabled, connection.ProxyProtocolVersion,
+		connection.ProxyProtocolHeaderSent, connection.ActivityID,
 	)
 	if err != nil {
 		return AnalyticsFinalizeResult{}, fmt.Errorf("finalize network connection: %w", err)

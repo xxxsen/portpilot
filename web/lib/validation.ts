@@ -38,5 +38,39 @@ export function validateProxyDraft(
   ) {
     return "TCP 代理承载方式无效";
   }
+  if (draft.data.network === "udp" && draft.data.enable_proxy_protocol) {
+    return "UDP 代理不能启用 PROXY Protocol";
+  }
+  const access = draft.data.access_policy;
+  for (const [label, values] of [
+    ["允许来源", access?.allow_cidrs ?? []],
+    ["拒绝来源", access?.deny_cidrs ?? []],
+  ] as const) {
+    if (values.length > 256) return `${label}最多填写 256 项`;
+    if (new Set(values).size !== values.length) return `${label}包含重复 CIDR`;
+    if (values.some((value) => !isCIDR(value))) return `${label}包含无效 CIDR`;
+  }
+  const limits = draft.data.rate_limit;
+  for (const [label, value] of [
+    ["上行", limits?.up_bytes_per_second ?? 0],
+    ["下行", limits?.down_bytes_per_second ?? 0],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || (value !== 0 && (value < 1024 || value > 2 ** 40))) {
+      return `${label}限速必须为不限速或 1 KiB/s 到 1 TiB/s`;
+    }
+  }
   return null;
+}
+
+function isCIDR(value: string): boolean {
+  const [address, prefix, ...rest] = value.split("/");
+  if (!address || prefix === undefined || rest.length > 0 || !/^\d+$/.test(prefix)) return false;
+  const bits = Number(prefix);
+  if (address.includes(":")) return bits >= 0 && bits <= 128 && /^[0-9a-fA-F:]+$/.test(address);
+  const octets = address.split(".");
+  if (bits < 0 || bits > 32 || octets.length !== 4) return false;
+  if (octets.some((octet) => !/^\d+$/.test(octet) || Number(octet) > 255)) return false;
+  const numeric = octets.reduce((result, octet) => (result * 256) + Number(octet), 0);
+  const hostBits = 32 - bits;
+  return hostBits === 32 || numeric % (2 ** hostBits) === 0;
 }

@@ -18,19 +18,14 @@ import (
 var ErrRevisionConflict = errors.New("configuration revision conflict")
 
 type Manager struct {
-	path         string
-	adminAddr    string
-	serverAddr   string
-	targetPolicy TargetPolicyConfig
-	writeMu      sync.Mutex
-	current      atomic.Pointer[ClientFile]
+	path       string
+	adminAddr  string
+	serverAddr string
+	writeMu    sync.Mutex
+	current    atomic.Pointer[ClientFile]
 }
 
 func NewManager(path, adminAddr, serverAddr string) (*Manager, error) {
-	return NewManagerWithPolicy(path, adminAddr, serverAddr, TargetPolicyConfig{})
-}
-
-func NewManagerWithPolicy(path, adminAddr, serverAddr string, targetPolicy TargetPolicyConfig) (*Manager, error) {
 	file, err := LoadClientFile(path)
 	if err != nil {
 		return nil, err
@@ -38,12 +33,8 @@ func NewManagerWithPolicy(path, adminAddr, serverAddr string, targetPolicy Targe
 	if err := file.Validate(adminAddr, serverAddr); err != nil {
 		return nil, err
 	}
-	if err := ValidateTargets(file, targetPolicy); err != nil {
-		return nil, err
-	}
 	manager := &Manager{
 		path: path, adminAddr: adminAddr, serverAddr: serverAddr,
-		targetPolicy: targetPolicy,
 	}
 	manager.current.Store(&file)
 	return manager, nil
@@ -96,9 +87,6 @@ func (m *Manager) Replace(expectedRevision uint64, next ClientFile, prepare Prep
 	normalizeClientMetadata(latest, &next, time.Now().UTC().UnixMilli())
 	next.Revision = expectedRevision + 1
 	if err := next.ValidateStrict(m.adminAddr, m.serverAddr); err != nil {
-		return ClientFile{}, err
-	}
-	if err := ValidateTargets(next, m.targetPolicy); err != nil {
 		return ClientFile{}, err
 	}
 	commit := func() {}
@@ -197,9 +185,6 @@ func (m *Manager) Reload() (ClientFile, error) {
 		return ClientFile{}, err
 	}
 	if err := file.Validate(m.adminAddr, m.serverAddr); err != nil {
-		return ClientFile{}, err
-	}
-	if err := ValidateTargets(file, m.targetPolicy); err != nil {
 		return ClientFile{}, err
 	}
 	snapshot := cloneClientFile(file)

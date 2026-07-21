@@ -4,10 +4,13 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
+	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestUDPFlowLimitQueueBoundAndChannelStickiness(t *testing.T) {
@@ -80,5 +83,33 @@ func TestUDPFlowLimitQueueBoundAndChannelStickiness(t *testing.T) {
 	}
 	if manager.bySource[sourceFlowKey("client", "proxy", 1, secondSource.String())] != nil {
 		t.Fatal("flow limit admitted a second source")
+	}
+}
+
+func TestUDPDropWritesRateLimitedStructuredLog(t *testing.T) {
+	t.Parallel()
+	core, observed := observer.New(zap.WarnLevel)
+	app := &App{
+		Logger:            zap.New(core),
+		RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
+	}
+	manager := NewUDPManager(app)
+	t.Cleanup(manager.Close)
+	runtime := ProxyRuntime{
+		ClientID: "client-a",
+		Proxy:    config.ProxyEnvelope{ProxyID: "proxy-a"},
+	}
+	source := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 53000}
+	manager.recordDrop(runtime, source, 512, "queue_full")
+	manager.recordDrop(runtime, source, 512, "queue_full")
+
+	logs := observed.FilterMessage("UDP datagram dropped").All()
+	if len(logs) != 1 {
+		t.Fatalf("UDP drop logs = %d, want 1", len(logs))
+	}
+	fields := logs[0].ContextMap()
+	if fields["reason"] != "queue_full" || fields["client_id"] != "client-a" ||
+		fields["proxy_id"] != "proxy-a" {
+		t.Fatalf("unexpected UDP drop log: %#v", fields)
 	}
 }

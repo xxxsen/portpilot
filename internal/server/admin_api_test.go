@@ -69,7 +69,8 @@ func TestAdminLoginUsesSelectedAbsoluteTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || page.Items[0].Outcome != "success" {
+	if page.Total != 1 || page.Items[0].Outcome != "success" ||
+		page.Items[0].SourceAddr != "192.0.2.1" {
 		t.Fatalf("login audit missing: %#v", page)
 	}
 }
@@ -96,6 +97,7 @@ func TestClientManagementAPICreatesAndRedactsToken(t *testing.T) {
 	}
 	app.Sessions = NewSessionManager(app)
 	app.Listeners = NewListenerManager(app)
+	app.Tunnels = NewTunnelManager(app)
 	app.UDP = NewUDPManager(app)
 	t.Cleanup(func() {
 		app.UDP.Close()

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -38,18 +40,29 @@ func (a *App) handleControl(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(int64(a.Config.Limits.MaxControlMessageBytes))
 	_ = conn.SetReadDeadline(time.Now().Add(a.Config.Duration(a.Config.Timeouts.ControlHandshake)))
 
-	clientID, err := a.authenticateControl(conn)
+	clientID, agent, agentStatus, agentErr, err := a.authenticateControl(conn)
 	if err != nil {
 		a.recordSecurity(r.Context(), clientID, "client_auth_failed", map[string]any{"source": source})
 		a.writeAuthFailure(conn)
 		return
+	}
+	if agentErr != nil {
+		a.writeAuditBestEffort(r.Context(), store.AuditEvent{
+			Category: "security", EventType: "client_agent_invalid", Outcome: "denied",
+			ActorType: "client", ActorID: clientID, SourceAddr: source,
+			ClientID: clientID, Summary: "客户端 Agent 信息无效",
+			ReasonCode: "client_agent_invalid",
+			Details:    map[string]any{"source": source},
+		})
 	}
 	sessionID, err := auth.RandomToken(18)
 	if err != nil {
 		a.writeAuthFailure(conn)
 		return
 	}
-	session := a.Sessions.Install(clientID, sessionID, conn)
+	session := a.Sessions.Install(
+		clientID, sessionID, source, agent, agentStatus, conn,
+	)
 	defer a.Sessions.Remove(session)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err := conn.WriteJSON(a.authOKMessage(session)); err != nil {
@@ -58,9 +71,12 @@ func (a *App) handleControl(w http.ResponseWriter, r *http.Request) {
 	a.writeAuditBestEffort(r.Context(), clientSessionAudit(
 		session, source, "success", "online", "客户端会话上线",
 	))
-	a.runControlSession(session)
+	reason := a.runControlSession(session)
+	session.Drain(reason)
+	session.persistOffline()
+	finalReason := session.CloseReason()
 	a.writeAuditBestEffort(context.WithoutCancel(r.Context()), clientSessionAudit(
-		session, source, "success", "offline", "客户端会话下线",
+		session, source, "success", finalReason, "客户端会话下线",
 	))
 }
 
@@ -72,59 +88,76 @@ func clientSessionAudit(
 	if len(sessionID) > 8 {
 		sessionID = sessionID[:8]
 	}
+	details := map[string]any{
+		"epoch": session.Epoch, "session_id_prefix": sessionID,
+		"source_addr": session.SourceAddr, "source_ip": session.SourceIP,
+		"connected_at": session.ConnectedAt,
+		"last_seen_at": session.lastSeenAt.Load(),
+		"agent_status": session.AgentStatus, "agent": session.Agent,
+	}
+	if reasonCode != "online" {
+		closedAt := time.Now().UTC().UnixMilli()
+		details["closed_at"] = closedAt
+		details["duration_millis"] = max(closedAt-session.ConnectedAt, 0)
+		details["control_rtt_millis"] = session.controlRTTMillis.Load()
+		details["close_reason"] = session.CloseReason()
+		details["final_mux_sessions"] = session.MuxCount()
+		details["final_active_streams"] = session.Status().ActiveStreams
+	}
 	return store.AuditEvent{
 		Category: "client", EventType: "client_session", Outcome: outcome,
 		ActorType: "client", ActorID: session.ClientID, SourceAddr: source,
 		ClientID: session.ClientID, Summary: summary, ReasonCode: reasonCode,
-		Details: map[string]any{
-			"epoch": session.Epoch, "session_id_prefix": sessionID,
-		},
+		Details: details,
 	}
 }
 
-func (a *App) authenticateControl(conn *websocket.Conn) (string, error) {
+func (a *App) authenticateControl(
+	conn *websocket.Conn,
+) (string, protocol.Agent, string, error, error) {
 	var initMessage protocol.Message
 	if err := conn.ReadJSON(&initMessage); err != nil {
-		return "", err
+		return "", protocol.Agent{}, "", nil, err
 	}
 	if initMessage.Version != protocol.Version || initMessage.Type != protocol.TypeAuthInit {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
 	init, err := protocol.DecodePayload[protocol.AuthInit](initMessage)
 	if err != nil || init.ClientID == "" || init.Role != "control" || init.ClientNonce == "" {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
 	client, ok := a.findClient(init.ClientID)
 	if !ok || !client.Enabled {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
 	challenge, err := a.Challenges.Create(init.ClientID, init.Role, init.ClientNonce)
 	if err != nil {
-		return "", fmt.Errorf("create authentication challenge: %w", err)
+		return "", protocol.Agent{}, "", nil, fmt.Errorf("create authentication challenge: %w", err)
 	}
 	challengeMessage, _ := protocol.NewMessage(protocol.TypeAuthChallenge, protocol.AuthChallenge{
 		ChallengeID: challenge.ID, Challenge: challenge.Value,
 		ExpiresAt: challenge.ExpiresAt.UTC().Format(time.RFC3339Nano),
 	})
 	if err := conn.WriteJSON(challengeMessage); err != nil {
-		return "", err
+		return "", protocol.Agent{}, "", nil, err
 	}
 	var proofMessage protocol.Message
 	if err := conn.ReadJSON(&proofMessage); err != nil {
-		return "", err
+		return "", protocol.Agent{}, "", nil, err
 	}
 	if proofMessage.Version != protocol.Version || proofMessage.Type != protocol.TypeAuthProof {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
 	proof, err := protocol.DecodePayload[protocol.AuthProof](proofMessage)
 	if err != nil || proof.ChallengeID != challenge.ID {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
 	consumed, ok := a.Challenges.Consume(proof.ChallengeID)
 	if !ok || !auth.VerifySignature(client.ClientToken, consumed, proof.Signature) {
-		return "", errors.New(protocol.ErrAuthFailed)
+		return "", protocol.Agent{}, "", nil, errors.New(protocol.ErrAuthFailed)
 	}
-	return init.ClientID, nil
+	agent, status, agentErr := normalizeAgent(init.Agent, time.Now())
+	return init.ClientID, agent, status, agentErr, nil
 }
 
 func (a *App) authOKMessage(session *Session) protocol.Message {
@@ -160,7 +193,7 @@ func (a *App) authOKMessage(session *Session) protocol.Message {
 	return message
 }
 
-func (a *App) runControlSession(session *Session) {
+func (a *App) runControlSession(session *Session) string {
 	writerErr := make(chan error, 1)
 	go func() { writerErr <- session.writeLoop() }()
 	a.ensureMux(session, a.Config.DataPlane.SMux.MinSessions)
@@ -175,6 +208,7 @@ func (a *App) runControlSession(session *Session) {
 				zap.Error(err),
 			)
 		}
+		return "control_write_failed"
 	case err := <-readErr:
 		if err != nil && !errors.Is(err, websocket.ErrCloseSent) {
 			a.Logger.Info(
@@ -183,9 +217,32 @@ func (a *App) runControlSession(session *Session) {
 				zap.Error(err),
 			)
 		}
+		return controlReadCloseReason(err)
 	case <-session.ctx.Done():
+		return session.CloseReason()
 	}
 }
+
+func controlReadCloseReason(err error) string {
+	if err == nil {
+		return "remote_closed"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return "heartbeat_timeout"
+	}
+	var closeError *websocket.CloseError
+	if errors.As(err, &closeError) {
+		return "remote_closed"
+	}
+	if errors.Is(err, errControlProtocol) ||
+		strings.Contains(err.Error(), protocol.ErrSessionStale) {
+		return "protocol_error"
+	}
+	return "control_read_failed"
+}
+
+var errControlProtocol = errors.New("control protocol error")
 
 func (a *App) controlReadLoop(session *Session) error {
 	timeout := a.Config.Duration(a.Config.Timeouts.HeartbeatTimeout)
@@ -197,10 +254,12 @@ func (a *App) controlReadLoop(session *Session) error {
 		}
 		if message.Version != protocol.Version || message.SessionID != session.ID ||
 			message.SessionEpoch != session.Epoch || !a.Sessions.IsCurrent(session) {
-			return errors.New(protocol.ErrSessionStale)
+			return fmt.Errorf("%w: %s", errControlProtocol, protocol.ErrSessionStale)
 		}
+		session.Touch()
 		switch message.Type {
 		case protocol.TypePong:
+			session.ObservePong(message.RequestID)
 		case protocol.TypeMuxReady:
 			a.UDP.EnsureChannels(session)
 		case protocol.TypeMuxClosed:
@@ -217,6 +276,7 @@ func (a *App) controlReadLoop(session *Session) error {
 		default:
 			errorMessage, _ := protocol.NewMessage(protocol.TypeError, protocol.ErrorPayload{Code: protocol.ErrInternal, Message: "unknown control message"})
 			_ = session.Send(errorMessage)
+			return fmt.Errorf("%w: unknown control message", errControlProtocol)
 		}
 	}
 }

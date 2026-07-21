@@ -35,7 +35,7 @@ SERVER_IMAGE ?= portpilot-server
 CLIENT_IMAGE ?= portpilot-client
 WEB_IMAGE ?= portpilot-web
 IMAGE_TAG ?= latest
-ACCEPT_SOAK_DURATION ?= 5m
+ACCEPT_SOAK_DURATION ?= 15m
 ACCEPT_CHAOS_INTERVAL ?= 1m
 ACCEPT_DEV_READY_TIMEOUT_SECONDS ?= 180
 ACCEPT_TCP_CONCURRENCY ?= 128
@@ -71,7 +71,7 @@ doctor: ## Check development tools and local ports
 	@"$(PROJECT_ROOT)/bin/golangci-lint" version
 	@"$(PROJECT_ROOT)/bin/shellcheck" --version | grep -F "version: 0.11.0"
 	@"$(PROJECT_ROOT)/bin/hadolint" --version
-	@for port in 3000 5100 6100 7000 7001 7002 18080 18081; do \
+	@for port in 3000 5100 6100 7000 7001 7002 7003 7004 18080 18081 18082; do \
 		if ss -H -ltnu 2>/dev/null | awk '{print $$5}' | grep -Eq ":$${port}$$"; then \
 			echo "Port $${port} is already in use" >&2; exit 1; \
 		fi; \

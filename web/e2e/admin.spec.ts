@@ -13,7 +13,7 @@ async function login(page: Page) {
 async function navigate(page: Page, label: "客户端" | "代理规则" | "网络活动" | "事件与审计") {
   const menu = page.getByRole("button", {name: "打开导航"});
   if (await menu.isVisible()) await menu.click();
-  await page.getByRole("button", {name: label}).click();
+  await page.getByRole("navigation").getByRole("button", {name: label}).click();
 }
 
 async function expectYAxisLabelsInsideChart(page: Page) {
@@ -163,9 +163,29 @@ test("live status and audit views expose the formal server state", async ({page}
   await expect(page.getByText("ACTIVE", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("UDP 通道", {exact: true})).toBeVisible();
 
+  const overviewClient = page.locator(".overview-client-row").filter({hasText: "dev-client"});
+  await expect(overviewClient).toContainText("心跳");
+  await expect(overviewClient).not.toContainText("心跳 -");
+  await overviewClient.locator("td").first().click();
+  const overviewDetail = page.getByRole("dialog", {name: "本地开发客户端"});
+  await expect(overviewDetail.getByRole("heading", {name: "Agent 环境"})).toBeVisible();
+  await expect(overviewDetail.getByText("最后心跳")).toBeVisible();
+  await overviewDetail.getByRole("button", {name: "关闭"}).click();
+  await overviewClient.getByRole("button", {name: "查看 dev-client 网络活动"}).click();
+  await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
+  await expect(page.getByLabel("网络活动视图").getByRole("button", {name: "客户端", exact: true})).toHaveClass(/selected/);
+  await expect(page.getByLabel("查看客户端")).toHaveValue("dev-client");
+  expect(new URL(page.url()).searchParams.get("client_id")).toBe("dev-client");
+
   await navigate(page, "客户端");
   const client = page.locator(".client-row").filter({hasText: "dev-client"});
-  await expect(client).toContainText("3 条代理");
+  await expect(client).toContainText("5 条代理");
+  await client.getByRole("button", {name: "查看 dev-client 详情"}).click();
+  const clientDetail = page.getByRole("dialog", {name: "本地开发客户端"});
+  await expect(clientDetail.getByRole("heading", {name: "Agent 环境"})).toBeVisible();
+  await expect(clientDetail).toContainText("tcp-smux");
+  await expect(clientDetail.getByRole("heading", {name: "控制会话"})).toBeVisible();
+  await clientDetail.getByRole("button", {name: "关闭"}).click();
 
   await navigate(page, "网络活动");
   await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
@@ -242,17 +262,25 @@ test("live status and audit views expose the formal server state", async ({page}
   const networkResponse = await page.request.get("/backend/api/network/connections?scope=history&page=1&page_size=25");
   expect(networkResponse.ok()).toBeTruthy();
   const network = await networkResponse.json() as {
-    items: Array<{proxy_id: string}>;
+    items: Array<{proxy_id: string; protocol: string}>;
   };
   expect(network.items.length).toBeGreaterThan(0);
-  await page.getByRole("row").filter({hasText: network.items[0].proxy_id}).last().click();
+  const visibleTCPConnection = page.locator(".history-connections-table tbody tr")
+    .filter({hasText: "TCP"}).first();
+  await expect(visibleTCPConnection).toBeVisible();
+  await visibleTCPConnection.click();
   await expect(page.getByRole("dialog", {name: "连接详情"})).toBeVisible();
   await expect(page.getByText("外部来源", {exact: true})).toBeVisible();
+  await expect(page.getByText("PROXY Protocol", {exact: true})).toBeVisible();
+  await expect(page.getByText("连接限速", {exact: true})).toBeVisible();
   await page.getByRole("button", {name: "关闭"}).click();
 
   await navigate(page, "事件与审计");
   await expect(page.getByRole("heading", {name: "事件与审计", level: 1})).toBeVisible();
   await expect(page.locator(".audit-table tbody tr").first()).toBeVisible();
+  await expect(page.locator(".audit-table thead th").filter({hasText: /^IP$/})).toBeVisible();
+  const loginAudit = page.locator(".audit-table tbody tr").filter({hasText: "admin_login"}).first();
+  await expect(loginAudit.locator(".audit-source-ip")).not.toHaveText("-");
 });
 
 test("proxy CRUD validates drafts, rejects stale revisions, and records audit", async ({page}, testInfo) => {
@@ -277,15 +305,39 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await editor.getByLabel("承载").selectOption("smux");
     await editor.getByLabel("服务端监听").fill("127.0.0.1:7100");
     await editor.getByLabel("内网目标").fill("127.0.0.1:18080");
+    await editor.getByLabel("允许来源 CIDR").fill("127.0.0.0/8");
+    await editor.getByLabel("拒绝来源 CIDR").fill("127.0.0.9/32");
+    await editor.locator(".toggle-setting .switch").click();
+    await expect(editor.getByLabel("启用 PROXY Protocol v1")).toBeChecked();
+    const rateEditors = editor.locator(".rate-editor");
+    await rateEditors.nth(0).getByRole("checkbox", {name: "不限速"}).uncheck();
+    await rateEditors.nth(0).getByRole("spinbutton").fill("64");
+    await rateEditors.nth(1).getByRole("checkbox", {name: "不限速"}).uncheck();
+    await rateEditors.nth(1).getByRole("spinbutton").fill("128");
     await editor.getByRole("button", {name: "保存配置"}).click();
     await expect(editor).toBeHidden();
+    const securedRow = page.getByRole("row").filter({hasText: proxyIds[0]});
+    await expect(securedRow).toContainText("允许 1");
+    await expect(securedRow).toContainText("v1");
+    await expect(securedRow).toContainText("64 KiB/s");
     await createProxy(page, proxyIds[1], "tcp", "direct", "127.0.0.1:7101", "127.0.0.1:18080");
     await createProxy(page, proxyIds[2], "udp", "smux-datagram", "127.0.0.1:7102", "127.0.0.1:18081");
 
     await page.locator("#proxy-client").selectOption("dev-client");
     await page.getByRole("button", {name: "新增代理"}).click();
+    const protocolSwitch = page.getByLabel("启用 PROXY Protocol v1");
+    await page.getByRole("dialog", {name: "新增代理"}).locator(".toggle-setting .switch").click();
+    await expect(protocolSwitch).toBeChecked();
+    await page.getByLabel("网络").selectOption("udp");
+    await expect(protocolSwitch).toBeDisabled();
+    await expect(protocolSwitch).not.toBeChecked();
     await page.getByLabel("代理 ID").fill("e2e-duplicate");
-    await page.getByLabel("服务端监听").fill(":7100");
+    await page.getByLabel("服务端监听").fill(":7103");
+    await page.getByLabel("内网目标").fill("127.0.0.1:18081");
+    await page.getByLabel("允许来源 CIDR").fill("192.0.2.1/24");
+    await page.getByRole("button", {name: "保存配置"}).click();
+    await expect(page.getByText(/包含无效 CIDR/)).toBeVisible();
+    await page.getByLabel("允许来源 CIDR").fill("");
     await page.getByLabel("内网目标").fill("invalid-target");
     await page.getByRole("button", {name: "保存配置"}).click();
     await expect(page.getByText("内网目标必须是有效的 host:port")).toBeVisible();

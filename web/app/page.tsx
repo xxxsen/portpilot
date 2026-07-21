@@ -139,6 +139,14 @@ export default function Home() {
     }
   };
 
+  const openClientNetwork = (clientID: string) => {
+    const params = new URLSearchParams();
+    params.set("network_view", "client");
+    params.set("client_id", clientID);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
+    setView("network");
+  };
+
   if (checking) return <div className="center-state"><RefreshCw className="spin" aria-label="加载中" /></div>;
   if (!session) return <Login busy={busy} error={error} onSubmit={login} />;
 
@@ -170,7 +178,7 @@ export default function Home() {
         </header>
         {error && <div className="error-banner">{error}<button onClick={() => setError("")} aria-label="关闭"><X size={16} /></button></div>}
         <div className="workspace">
-          {view === "overview" && <OverviewPage summary={summary} clients={clients.items} events={events} />}
+          {view === "overview" && <OverviewPage summary={summary} clients={clients.items} events={events} onOpenNetwork={openClientNetwork} />}
           {view === "clients" && <ClientPage data={clients} csrf={session.csrf_token} onRefresh={refresh} onError={setError} />}
           {view === "proxies" && config && <ProxyPage config={config} busy={busy} onSave={saveConfig} />}
           {view === "network" && <NetworkPage onUnauthorized={clearSession} />}

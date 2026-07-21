@@ -65,6 +65,9 @@ type AuditPage struct {
 }
 
 var (
+	runtimeLogEventTypes = []string{
+		"external_access_denied", "udp_drop", "proxy_protocol_write_failed", "security",
+	}
 	auditCategories = map[string]struct{}{
 		"auth": {}, "config": {}, "client": {}, "security": {}, "system": {},
 	}
@@ -77,8 +80,9 @@ var (
 	auditEventTypes = map[string]struct{}{
 		"admin_login": {}, "admin_logout": {}, "config_update": {},
 		"client_created": {}, "client_updated": {}, "client_token_rotated": {},
-		"admin_client_disconnect": {}, "client_session": {}, "security": {},
-		"udp_drop": {}, "database_rebuilt": {}, "system_start": {}, "system_stop": {},
+		"admin_client_disconnect": {}, "client_session": {},
+		"client_agent_invalid": {}, "database_rebuilt": {},
+		"system_start": {}, "system_stop": {},
 		"config_metadata_migrated": {},
 	}
 )
@@ -334,8 +338,11 @@ func normalizeAuditQuery(query AuditQuery) (AuditQuery, error) {
 }
 
 func auditWhere(query AuditQuery) (string, []any) {
-	var clauses []string
-	var arguments []any
+	clauses := []string{"event_type NOT IN (?, ?, ?, ?)"}
+	arguments := make([]any, 0, len(runtimeLogEventTypes)+8)
+	for _, eventType := range runtimeLogEventTypes {
+		arguments = append(arguments, eventType)
+	}
 	if query.Query != "" {
 		value := "%" + escapeLike(query.Query) + "%"
 		clauses = append(clauses, `(summary LIKE ? ESCAPE '\' OR actor_id LIKE ? ESCAPE '\'
@@ -365,9 +372,6 @@ func auditWhere(query AuditQuery) (string, []any) {
 		clauses = append(clauses, "occurred_at<?")
 		arguments = append(arguments, query.DateTo)
 	}
-	if len(clauses) == 0 {
-		return "", arguments
-	}
 	return " WHERE " + strings.Join(clauses, " AND "), arguments
 }
 
@@ -386,7 +390,11 @@ func (s *Store) AuditDetail(ctx context.Context, id string) (AuditEvent, error) 
 		id, occurred_at, category, event_type, outcome, actor_type, actor_id,
 		source_addr, client_id, proxy_id, connection_id, summary, reason_code,
 		reason, details_json
-		FROM audit_events WHERE id=?`, id).Scan(
+		FROM audit_events WHERE id=? AND event_type NOT IN (?, ?, ?, ?)`,
+		id,
+		runtimeLogEventTypes[0], runtimeLogEventTypes[1],
+		runtimeLogEventTypes[2], runtimeLogEventTypes[3],
+	).Scan(
 		&event.ID, &event.OccurredAt, &event.Category, &event.EventType,
 		&event.Outcome, &event.ActorType, &event.ActorID, &event.SourceAddr,
 		&event.ClientID, &event.ProxyID, &event.ConnectionID, &event.Summary,

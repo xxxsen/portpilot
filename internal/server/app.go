@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
@@ -21,30 +22,36 @@ import (
 )
 
 type App struct {
-	Config         config.ServerConfig
-	ConfigManager  *config.Manager
-	Sessions       *SessionManager
-	Tickets        *auth.TicketStore
-	Challenges     *auth.ChallengeStore
-	Tunnels        *TunnelManager
-	UDP            *UDPManager
-	Listeners      *ListenerManager
-	Events         *store.Store
-	Activity       *activity.Service
-	GeoIP          *geoip.Resolver
-	Admin          *AdminAuth
-	ControlLimiter *auth.RateLimiter
-	DataLimiter    *auth.RateLimiter
-	Logger         *zap.Logger
+	Config            config.ServerConfig
+	ConfigManager     *config.Manager
+	Sessions          *SessionManager
+	Tickets           *auth.TicketStore
+	Challenges        *auth.ChallengeStore
+	Tunnels           *TunnelManager
+	UDP               *UDPManager
+	Listeners         *ListenerManager
+	Events            *store.Store
+	Activity          *activity.Service
+	GeoIP             *geoip.Resolver
+	Admin             *AdminAuth
+	ControlLimiter    *auth.RateLimiter
+	DataLimiter       *auth.RateLimiter
+	RuntimeLogLimiter *auth.RateLimiter
+	GlobalAccess      accesspolicy.Policy
+	Logger            *zap.Logger
 
 	adminServer *http.Server
 	dataServer  *http.Server
 	analytics   analyticsQueryMetrics
+	access      externalAccessMetrics
 
 	analyticsTimeout time.Duration
 	storeError       atomic.Bool
 	ready            atomic.Bool
 	closeOnce        sync.Once
+	agentSnapshots   chan store.ClientAgentSnapshot
+	agentWriterWG    sync.WaitGroup
+	agentWriterClose sync.Once
 }
 
 func New(configPath string, logger *zap.Logger) (*App, error) {
@@ -59,19 +66,21 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	if logger == nil {
 		logger = logutil.GetLogger(context.Background())
 	}
-	configManager, err := config.NewManagerWithPolicy(
-		cfg.ClientConfigFile, cfg.AdminAddr, cfg.ServerAddr, cfg.TargetPolicy,
+	configManager, err := config.NewManager(
+		cfg.ClientConfigFile, cfg.AdminAddr, cfg.ServerAddr,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("load client proxy configuration: %w", err)
 	}
 	app := &App{
 		Config: cfg, ConfigManager: configManager, Logger: logger,
-		Tickets:        auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
-		Challenges:     auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
-		Admin:          NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
-		ControlLimiter: auth.NewRateLimiter(60, time.Minute),
-		DataLimiter:    auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
+		Tickets:           auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
+		Challenges:        auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
+		Admin:             NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
+		ControlLimiter:    auth.NewRateLimiter(60, time.Minute),
+		DataLimiter:       auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
+		RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
+		GlobalAccess:      accesspolicy.Compile(cfg.AccessPolicy),
 	}
 	app.Sessions = NewSessionManager(app)
 	app.Tunnels = NewTunnelManager(app)
@@ -181,6 +190,7 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 		ReadHeaderTimeout: cfg.Duration(cfg.Timeouts.ControlHandshake),
 		IdleTimeout:       0,
 	}
+	app.startAgentWriter()
 	return app, nil
 }
 
@@ -226,6 +236,7 @@ func (a *App) Close(parent context.Context) error {
 			ActorType: "system", Summary: "PortPilot 服务停止", ReasonCode: "shutdown",
 			Details: map[string]any{"version": version.String()},
 		})
+		a.closeAgentWriter()
 		storeErr := a.Events.Close()
 		result = errors.Join(adminErr, dataErr, storeErr)
 	})

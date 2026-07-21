@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,21 +13,28 @@ import (
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/protocol"
+	"github.com/portpilot/portpilot/internal/proxyproto"
+	"github.com/portpilot/portpilot/internal/ratelimit"
 	"github.com/portpilot/portpilot/internal/relay"
+	"go.uber.org/zap"
 )
 
 type pendingTunnel struct {
-	ID        string
-	ClientID  string
-	ProxyID   string
-	SessionID string
-	Epoch     uint64
-	External  net.Conn
-	Data      net.Conn
-	CreatedAt time.Time
-	Activity  *activity.Handle
-	done      chan struct{}
-	closed    atomic.Bool
+	ID                   string
+	ClientID             string
+	ProxyID              string
+	SessionID            string
+	Epoch                uint64
+	External             net.Conn
+	Data                 net.Conn
+	CreatedAt            time.Time
+	Activity             *activity.Handle
+	Limits               *ratelimit.Pair
+	ProxyProtocolEnabled bool
+	ProxyProtocolHeader  []byte
+	ProxyProtocolError   error
+	done                 chan struct{}
+	closed               atomic.Bool
 }
 
 type TunnelManager struct {
@@ -101,7 +109,19 @@ func (m *TunnelManager) HandleExternal(ctx context.Context, runtime ProxyRuntime
 	pending := &pendingTunnel{
 		ID: connectionID, ClientID: runtime.ClientID, ProxyID: runtime.Proxy.ProxyID,
 		SessionID: session.ID, Epoch: session.Epoch, External: conn,
-		CreatedAt: time.Now(), Activity: activityHandle, done: make(chan struct{}),
+		CreatedAt: time.Now(), Activity: activityHandle,
+		Limits: ratelimit.NewPair(
+			runtime.Data.RateLimit.UpBytesPerSecond,
+			runtime.Data.RateLimit.DownBytesPerSecond,
+			false, 0,
+		),
+		ProxyProtocolEnabled: runtime.Data.EnableProxyProtocol,
+		done:                 make(chan struct{}),
+	}
+	if pending.ProxyProtocolEnabled {
+		pending.ProxyProtocolHeader, pending.ProxyProtocolError = proxyproto.V1(
+			conn.RemoteAddr(), conn.LocalAddr(),
+		)
 	}
 	if activityHandle != nil {
 		activityHandle.Connecting()
@@ -159,7 +179,7 @@ func (m *TunnelManager) Pair(ctx context.Context, open protocol.StreamOpen, data
 		}
 	}
 	m.activeTunnels[pending.ID] = pending
-	close(pending.done)
+	signalTunnelDone(pending)
 	m.active.Add(1)
 	m.activeByClient[pending.ClientID]++
 	m.mu.Unlock()
@@ -179,10 +199,31 @@ func (m *TunnelManager) Relay(ctx context.Context, pending *pendingTunnel, dataC
 	}()
 	relayCtx, cancel := context.WithTimeout(ctx, m.app.Config.Duration(m.app.Config.Timeouts.TCPMaxLifetime))
 	defer cancel()
+	if err := m.writeProxyProtocolHeader(pending, dataConn); err != nil {
+		_ = pending.External.Close()
+		_ = dataConn.Close()
+		if pending.Activity != nil {
+			pending.Activity.Fail(
+				"proxy_protocol_write_failed",
+				"could not send PROXY protocol header",
+			)
+		}
+		if m.app.Logger != nil {
+			m.app.Logger.Error(
+				"write PROXY protocol header failed",
+				zap.String("client_id", pending.ClientID),
+				zap.String("proxy_id", pending.ProxyID),
+				zap.String("connection_id", pending.ID),
+				zap.String("stage", "before_payload"),
+				zap.Error(err),
+			)
+		}
+		return
+	}
 	if pending.Activity != nil {
 		pending.Activity.Connected()
 	}
-	result := relay.BidirectionalObserved(
+	result := relay.BidirectionalObservedWrapped(
 		relayCtx, pending.External, dataConn,
 		m.app.Config.Duration(m.app.Config.Timeouts.TCPIdle),
 		func(bytes int) {
@@ -195,6 +236,16 @@ func (m *TunnelManager) Relay(ctx context.Context, pending *pendingTunnel, dataC
 				pending.Activity.AddDown(bytes, 0)
 			}
 		},
+		ratelimit.WrapWriter(relayCtx, pending.Limits.Up, func(waited time.Duration) {
+			if pending.Activity != nil {
+				pending.Activity.AddUpThrottled(waited)
+			}
+		}),
+		ratelimit.WrapWriter(relayCtx, pending.Limits.Down, func(waited time.Duration) {
+			if pending.Activity != nil {
+				pending.Activity.AddDownThrottled(waited)
+			}
+		}),
 	)
 	reason := "closed"
 	if result.Err != nil && !errors.Is(result.Err, net.ErrClosed) {
@@ -203,6 +254,40 @@ func (m *TunnelManager) Relay(ctx context.Context, pending *pendingTunnel, dataC
 	if pending.Activity != nil {
 		pending.Activity.Close(reason, reason)
 	}
+}
+
+func (m *TunnelManager) writeProxyProtocolHeader(
+	pending *pendingTunnel,
+	dataConn net.Conn,
+) error {
+	if !pending.ProxyProtocolEnabled {
+		return nil
+	}
+	if pending.ProxyProtocolError != nil {
+		return pending.ProxyProtocolError
+	}
+	deadline := time.Now().Add(m.app.Config.Duration(m.app.Config.Timeouts.DataConnect))
+	if err := dataConn.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("set PROXY protocol write deadline: %w", err)
+	}
+	written := 0
+	for written < len(pending.ProxyProtocolHeader) {
+		count, err := dataConn.Write(pending.ProxyProtocolHeader[written:])
+		written += count
+		if err != nil {
+			return fmt.Errorf("write PROXY protocol header: %w", err)
+		}
+		if count == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	if err := dataConn.SetWriteDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear PROXY protocol write deadline: %w", err)
+	}
+	if pending.Activity != nil {
+		pending.Activity.MarkProxyProtocolHeaderSent()
+	}
+	return nil
 }
 
 func (m *TunnelManager) HandleOpenResult(result protocol.OpenResult) {
@@ -223,7 +308,7 @@ func (m *TunnelManager) CancelSession(session *Session) {
 	m.mu.Unlock()
 	for _, pending := range remove {
 		if pending.closed.CompareAndSwap(false, true) {
-			close(pending.done)
+			signalTunnelDone(pending)
 			_ = pending.External.Close()
 			if pending.Activity != nil {
 				pending.Activity.Fail("session_closed", "client session closed before pairing")
@@ -257,7 +342,7 @@ func (m *TunnelManager) remove(connectionID, reason string) {
 	}
 	m.mu.Unlock()
 	if pending != nil && pending.closed.CompareAndSwap(false, true) {
-		close(pending.done)
+		signalTunnelDone(pending)
 		_ = pending.External.Close()
 		if pending.Activity != nil {
 			pending.Activity.Fail(reason, reason)
@@ -282,6 +367,77 @@ func (m *TunnelManager) Counts() (pending int, active int64) {
 	return pending, m.active.Load()
 }
 
+func (m *TunnelManager) Reconcile() {
+	runtimes := make(map[string]ProxyRuntime)
+	for _, runtime := range m.app.Listeners.Snapshot() {
+		if runtime.Data.Network == "tcp" {
+			runtimes[runtime.Proxy.ProxyID] = runtime
+		}
+	}
+	var closeItems []*pendingTunnel
+	m.mu.Lock()
+	for id, tunnel := range m.pending {
+		runtime, ok := runtimes[tunnel.ProxyID]
+		allowed := ok
+		if allowed {
+			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())
+		}
+		if !allowed {
+			delete(m.pending, id)
+			closeItems = append(closeItems, tunnel)
+			continue
+		}
+		_ = tunnel.Limits.Up.Update(runtime.Data.RateLimit.UpBytesPerSecond, false, 0)
+		_ = tunnel.Limits.Down.Update(runtime.Data.RateLimit.DownBytesPerSecond, false, 0)
+		if tunnel.Activity != nil {
+			tunnel.Activity.SetRateLimits(
+				runtime.Data.RateLimit.UpBytesPerSecond,
+				runtime.Data.RateLimit.DownBytesPerSecond,
+			)
+		}
+	}
+	for _, tunnel := range m.activeTunnels {
+		runtime, ok := runtimes[tunnel.ProxyID]
+		allowed := ok
+		if allowed {
+			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())
+		}
+		if !allowed {
+			closeItems = append(closeItems, tunnel)
+			continue
+		}
+		_ = tunnel.Limits.Up.Update(runtime.Data.RateLimit.UpBytesPerSecond, false, 0)
+		_ = tunnel.Limits.Down.Update(runtime.Data.RateLimit.DownBytesPerSecond, false, 0)
+		if tunnel.Activity != nil {
+			tunnel.Activity.SetRateLimits(
+				runtime.Data.RateLimit.UpBytesPerSecond,
+				runtime.Data.RateLimit.DownBytesPerSecond,
+			)
+		}
+	}
+	m.mu.Unlock()
+	for _, tunnel := range closeItems {
+		if tunnel.Activity != nil {
+			tunnel.Activity.Close("source_policy_changed", "external source no longer allowed")
+		}
+		_ = tunnel.External.Close()
+		if tunnel.Data != nil {
+			_ = tunnel.Data.Close()
+		}
+		if tunnel.closed.CompareAndSwap(false, true) {
+			signalTunnelDone(tunnel)
+		}
+	}
+}
+
+func signalTunnelDone(tunnel *pendingTunnel) {
+	select {
+	case <-tunnel.done:
+	default:
+		close(tunnel.done)
+	}
+}
+
 func (m *TunnelManager) startActivity(runtime ProxyRuntime, conn net.Conn) (*activity.Handle, error) {
 	if m.app.Activity == nil {
 		return nil, errActivityDisabled
@@ -292,7 +448,10 @@ func (m *TunnelManager) startActivity(runtime ProxyRuntime, conn net.Conn) (*act
 		ProxyID: runtime.Proxy.ProxyID, ProxyRemark: runtime.Proxy.Remark,
 		ExternalAddr: conn.RemoteAddr().String(), ServerBind: runtime.Data.Bind,
 		TargetAddr: runtime.Data.Connect, Transport: runtime.Data.Transport,
-		SessionEpoch: epoch,
+		SessionEpoch:            epoch,
+		UpLimitBytesPerSecond:   runtime.Data.RateLimit.UpBytesPerSecond,
+		DownLimitBytesPerSecond: runtime.Data.RateLimit.DownBytesPerSecond,
+		ProxyProtocolEnabled:    runtime.Data.EnableProxyProtocol,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("start TCP network activity: %w", err)

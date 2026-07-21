@@ -295,6 +295,13 @@ function NetworkDetailView({detail}: {detail: NetworkDetail}) {
       <dt>总时长</dt><dd>{formatDuration(duration)}</dd>
       <dt>上传 / 下载</dt><dd>{formatBytes(detail.up_bytes)} / {formatBytes(detail.down_bytes)}</dd>
       {!detail.closed_at && <><dt>当前速率</dt><dd>↑ {formatRate(detail.up_bytes_per_second)} / ↓ {formatRate(detail.down_bytes_per_second)}<small>{formatRateWindow(detail.rate_window_millis)}</small></dd></>}
+      <dt>连接限速</dt><dd>↑ {formatConfiguredLimit(detail.up_limit_bytes_per_second)} / ↓ {formatConfiguredLimit(detail.down_limit_bytes_per_second)}</dd>
+      {detail.protocol === "tcp" ? <>
+        <dt>限速等待</dt><dd>↑ {detail.up_throttled_millis} ms / ↓ {detail.down_throttled_millis} ms</dd>
+        <dt>PROXY Protocol</dt><dd>{detail.proxy_protocol_enabled ? `v${detail.proxy_protocol_version} · ${detail.proxy_protocol_header_sent ? "已发送" : "未发送"}` : "关闭"}</dd>
+      </> : <>
+        <dt>限速丢弃</dt><dd>↑ {detail.up_rate_limited_packets} 包 / {formatBytes(detail.up_rate_limited_bytes)}<small>↓ {detail.down_rate_limited_packets} 包 / {formatBytes(detail.down_rate_limited_bytes)}</small></dd>
+      </>}
       <dt>UDP 包</dt><dd>{detail.up_packets} / {detail.down_packets}</dd>
       <dt>关闭原因</dt><dd>{detail.close_reason || "-"}<small>{detail.close_reason_code}</small></dd>
     </dl>
@@ -321,6 +328,10 @@ function NetworkDetailView({detail}: {detail: NetworkDetail}) {
     </section>
     {detail.samples_expired && <div className="stale-banner">细粒度流量序列已过保留期</div>}
   </div>;
+}
+
+function formatConfiguredLimit(value: number) {
+  return value > 0 ? formatRate(value) : "不限速";
 }
 
 function Pagination({

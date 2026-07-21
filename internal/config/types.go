@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,11 +26,11 @@ const RedactionMarker = "__REDACTED__"
 type ServerConfig struct {
 	AdminAddr        string                 `json:"admin_addr"`
 	ServerAddr       string                 `json:"server_addr"`
-	TrustedProxies   []string               `json:"trusted_proxy_cidrs"`
+	RealIPHeader     string                 `json:"real_ip_header"`
 	Users            []User                 `json:"users"`
 	ClientConfigFile string                 `json:"client_config_file"`
 	DataDB           string                 `json:"data_db"`
-	TargetPolicy     TargetPolicyConfig     `json:"target_policy"`
+	AccessPolicy     AccessPolicyConfig     `json:"access_policy"`
 	DataPlane        DataPlaneConfig        `json:"data_plane"`
 	Timeouts         TimeoutConfig          `json:"timeouts"`
 	Limits           LimitConfig            `json:"limits"`
@@ -129,11 +130,14 @@ type ProxyEnvelope struct {
 }
 
 type TunnelData struct {
-	Network           string `json:"network"`
-	Transport         string `json:"transport"`
-	Bind              string `json:"bind"`
-	Connect           string `json:"connect"`
-	TransportExplicit bool   `json:"-"`
+	Network             string             `json:"network"`
+	Transport           string             `json:"transport"`
+	Bind                string             `json:"bind"`
+	Connect             string             `json:"connect"`
+	EnableProxyProtocol bool               `json:"enable_proxy_protocol"`
+	AccessPolicy        AccessPolicyConfig `json:"access_policy"`
+	RateLimit           RateLimitConfig    `json:"rate_limit"`
+	TransportExplicit   bool               `json:"-"`
 }
 
 type ClientRuntimeConfig struct {
@@ -155,10 +159,9 @@ func DefaultLogConfig() commonlogger.LogConfig {
 
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		AdminAddr:      "127.0.0.1:5100",
-		ServerAddr:     "127.0.0.1:6100",
-		TrustedProxies: []string{},
-		LogConfig:      DefaultLogConfig(),
+		AdminAddr:  "127.0.0.1:5100",
+		ServerAddr: "127.0.0.1:6100",
+		LogConfig:  DefaultLogConfig(),
 		DataPlane: DataPlaneConfig{
 			DefaultTransport: "auto",
 			DirectFallback:   true,
@@ -206,6 +209,7 @@ func LoadServer(path string) (ServerConfig, error) {
 	base := filepath.Dir(path)
 	cfg.ClientConfigFile = resolvePath(base, cfg.ClientConfigFile)
 	cfg.DataDB = resolvePath(base, cfg.DataDB)
+	cfg.RealIPHeader = textproto.CanonicalMIMEHeaderKey(cfg.RealIPHeader)
 	cfg.LogConfig = normalizeLogConfig(base, cfg.LogConfig)
 	if cfg.Observability.GeoIPCountryDatabase != "" {
 		cfg.Observability.GeoIPCountryDatabase = resolvePath(
@@ -274,10 +278,10 @@ func (c ServerConfig) Validate() error {
 	if err := validateUsers(c.Users); err != nil {
 		return err
 	}
-	if err := validateTrustedProxies(c.TrustedProxies); err != nil {
+	if err := validateRealIPHeader(c.RealIPHeader); err != nil {
 		return err
 	}
-	if err := c.TargetPolicy.Validate(); err != nil {
+	if err := c.AccessPolicy.Validate(); err != nil {
 		return err
 	}
 	if err := validateDataPlane(c.DataPlane); err != nil {
@@ -361,11 +365,22 @@ func validateUsers(users []User) error {
 	return nil
 }
 
-func validateTrustedProxies(cidrs []string) error {
-	for _, cidr := range cidrs {
-		if _, _, err := net.ParseCIDR(cidr); err != nil {
-			return fmt.Errorf("invalid trusted proxy %q: %w", cidr, err)
+func validateRealIPHeader(value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > 128 || strings.TrimSpace(value) != value {
+		return errors.New("real_ip_header must be a valid HTTP field-name with at most 128 bytes")
+	}
+	for index := range len(value) {
+		character := value[index]
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
 		}
+		return errors.New("real_ip_header must be a valid HTTP field-name with at most 128 bytes")
 	}
 	return nil
 }
@@ -587,6 +602,12 @@ func (p ProxyEnvelope) Tunnel() (TunnelData, error) {
 	if data.Network != "tcp" && data.Network != "udp" {
 		return TunnelData{}, errors.New("network must be tcp or udp")
 	}
+	if err := data.AccessPolicy.Validate(); err != nil {
+		return TunnelData{}, fmt.Errorf("invalid access_policy: %w", err)
+	}
+	if err := data.RateLimit.Validate(); err != nil {
+		return TunnelData{}, fmt.Errorf("invalid rate_limit: %w", err)
+	}
 	if _, _, err := net.SplitHostPort(data.Bind); err != nil {
 		return TunnelData{}, fmt.Errorf("invalid bind: %w", err)
 	}
@@ -594,22 +615,32 @@ func (p ProxyEnvelope) Tunnel() (TunnelData, error) {
 		return TunnelData{}, fmt.Errorf("invalid connect: %w", err)
 	}
 	data.TransportExplicit = data.Transport != ""
+	if err := validateTunnelTransport(&data); err != nil {
+		return TunnelData{}, err
+	}
+	return data, nil
+}
+
+func validateTunnelTransport(data *TunnelData) error {
 	if data.Network == "udp" {
+		if data.EnableProxyProtocol {
+			return errors.New("enable_proxy_protocol is only supported for tcp")
+		}
 		if data.Transport == "" {
 			data.Transport = "smux-datagram"
 		}
 		if data.Transport != "smux-datagram" {
-			return TunnelData{}, errors.New("udp transport must be smux-datagram")
+			return errors.New("udp transport must be smux-datagram")
 		}
-	} else {
-		if data.Transport == "" {
-			data.Transport = "auto"
-		}
-		if data.Transport != "auto" && data.Transport != "smux" && data.Transport != "direct" {
-			return TunnelData{}, errors.New("tcp transport must be auto, smux, or direct")
-		}
+		return nil
 	}
-	return data, nil
+	if data.Transport == "" {
+		data.Transport = "auto"
+	}
+	if data.Transport != "auto" && data.Transport != "smux" && data.Transport != "direct" {
+		return errors.New("tcp transport must be auto, smux, or direct")
+	}
+	return nil
 }
 
 func (c ServerConfig) Duration(value string) time.Duration {

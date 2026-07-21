@@ -28,4 +28,30 @@ describe("validateProxyDraft", () => {
     }, existing)).toContain("内网目标");
     expect(validateProxyDraft(proxy("bad-udp", "udp", "direct", ":7102"), existing)).toContain("UDP");
   });
+
+  it("validates external CIDRs, rate limits, and PROXY protocol", () => {
+    const valid = proxy("secured", "tcp", "auto", ":7200");
+    valid.data.access_policy = {
+      allow_cidrs: ["192.0.2.0/24", "2001:db8::/32"],
+      deny_cidrs: ["192.0.2.128/25"],
+    };
+    valid.data.rate_limit = {
+      up_bytes_per_second: 1024,
+      down_bytes_per_second: 2 ** 40,
+    };
+    valid.data.enable_proxy_protocol = true;
+    expect(validateProxyDraft(valid, [])).toBeNull();
+
+    const badCIDR = structuredClone(valid);
+    badCIDR.data.access_policy!.allow_cidrs = ["192.0.2.1/24"];
+    expect(validateProxyDraft(badCIDR, [])).toContain("CIDR");
+
+    const badRate = structuredClone(valid);
+    badRate.data.rate_limit!.up_bytes_per_second = 1023;
+    expect(validateProxyDraft(badRate, [])).toContain("限速");
+
+    const udpProxy = proxy("udp-proxy", "udp", "smux-datagram", ":7201");
+    udpProxy.data.enable_proxy_protocol = true;
+    expect(validateProxyDraft(udpProxy, [])).toContain("PROXY Protocol");
+  });
 });
