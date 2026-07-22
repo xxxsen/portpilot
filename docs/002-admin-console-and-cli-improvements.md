@@ -325,4 +325,5 @@ fixture 不实现 PortPilot 控制、鉴权、smux 或代理逻辑。
 规则和真实 loopback 集成测试。面向 `master` 的 PR 同时运行 `make ci` 和
 `make acceptance`，后者默认执行 15 分钟 soak；正式版本 tag 不重复验收。镜像只通过
 `make build-images` 构建 `portpilot-server`、`portpilot-client` 和 `portpilot-web`；
-仓库不提供 Docker/Compose 运行目标。
+仓库不提供 Docker/Compose 运行目标。正式版本标签为三张镜像同时发布 `linux/amd64` 和
+`linux/arm64/v8` 的多架构 manifest。

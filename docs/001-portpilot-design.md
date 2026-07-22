@@ -837,7 +837,10 @@ Web 前端的校验、脱敏和权限显示不能替代服务端校验。
 Makefile 不提供 Docker/Compose 运行、容器 smoke 或容器测试目标。镜像只验证发布制品可以构建；
 所有功能正确性由 `make dev` 启动的正式进程验证。面向 `master` 的 PR 创建或更新时，
 `make ci` 与 `make acceptance` 作为两项独立门禁并行执行；直接 push `master` 只执行
-确定性 CI。正式版本 tag 只构建并发布三张镜像，不重复执行 soak。
+确定性 CI。正式版本 tag 只构建并发布三张镜像，不重复执行 soak；每个版本标签发布
+`linux/amd64` 和 `linux/arm64/v8` 的多架构 manifest。Makefile 的 `--load` 构建保持单平台，
+通过 `IMAGE_PLATFORM` 选择架构，本地 ARMv8 镜像必须使用独立标签以免覆盖 amd64 镜像，且
+Docker daemon 必须已经注册 ARM64 QEMU/binfmt；Tag 发布工作流负责自动初始化 QEMU。
 
 ## 15. 设计决策摘要
 

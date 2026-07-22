@@ -35,6 +35,7 @@ SERVER_IMAGE ?= portpilot-server
 CLIENT_IMAGE ?= portpilot-client
 WEB_IMAGE ?= portpilot-web
 IMAGE_TAG ?= latest
+IMAGE_PLATFORM ?= linux/amd64
 ACCEPT_SOAK_DURATION ?= 15m
 ACCEPT_CHAOS_INTERVAL ?= 1m
 ACCEPT_DEV_READY_TIMEOUT_SECONDS ?= 180
@@ -197,17 +198,18 @@ acceptance: ## Run full-service merge acceptance against make dev
 		"$(PROJECT_ROOT)/scripts/acceptance.sh"
 
 build-server-image: ## Build portpilot-server; never starts the image
-	docker buildx build --load \
+	docker buildx build --load --platform "$(IMAGE_PLATFORM)" \
 		--build-arg VERSION="$(VERSION)" --build-arg COMMIT="$(COMMIT)" --build-arg BUILD_TIME="$(BUILD_TIME)" \
 		-t "$(SERVER_IMAGE):$(IMAGE_TAG)" -f docker/Dockerfile.server .
 
 build-client-image: ## Build portpilot-client; never starts the image
-	docker buildx build --load \
+	docker buildx build --load --platform "$(IMAGE_PLATFORM)" \
 		--build-arg VERSION="$(VERSION)" --build-arg COMMIT="$(COMMIT)" --build-arg BUILD_TIME="$(BUILD_TIME)" \
 		-t "$(CLIENT_IMAGE):$(IMAGE_TAG)" -f docker/Dockerfile.client .
 
 build-web-image: ## Build portpilot-web; never starts the image
-	docker buildx build --load -t "$(WEB_IMAGE):$(IMAGE_TAG)" -f web/Dockerfile .
+	docker buildx build --load --platform "$(IMAGE_PLATFORM)" \
+		-t "$(WEB_IMAGE):$(IMAGE_TAG)" -f web/Dockerfile .
 
 build-images: build-server-image build-client-image build-web-image ## Build all three images without running them
 

@@ -105,4 +105,12 @@ make build-web-image
 make build-images
 ```
 
+本地构建默认生成 `linux/amd64` 镜像；构建 ARMv8 镜像时显式指定平台和独立标签：
+
+```bash
+make build-images IMAGE_PLATFORM=linux/arm64/v8 IMAGE_TAG=arm64
+```
+
+本地跨架构构建要求 Docker daemon 已注册 ARM64 QEMU/binfmt；Tag 发布工作流会自动完成该初始化。
+
 默认镜像名为 `portpilot-server`、`portpilot-client`、`portpilot-web`。仓库不提供镜像运行、Compose、容器 smoke 或容器测试命令；所有功能测试均由 `make dev` 启动正式 server/client 后执行。
