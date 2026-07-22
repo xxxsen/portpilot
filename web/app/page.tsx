@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import {useCallback, useEffect, useState} from "react";
 import {
   Activity,
   Cable,
@@ -9,23 +9,26 @@ import {
   Menu,
   Network,
   RefreshCw,
+  Search,
   Users,
   X,
 } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
+import {api, ApiError} from "@/lib/api";
 import type {
   AdminSession,
   AuditEvent,
   ClientFile,
   ClientList,
-  Summary,
+  NavigationDestination,
   Page,
+  Summary,
 } from "@/lib/types";
-import { OverviewPage } from "@/components/overview/overview-page";
-import { ClientPage } from "@/components/clients/client-page";
-import { ProxyPage } from "@/components/proxies/proxy-page";
-import { NetworkPage } from "@/components/network/network-page";
-import { AuditPage } from "@/components/audit/audit-page";
+import {OverviewPage} from "@/components/overview/overview-page";
+import {ClientPage} from "@/components/clients/client-page";
+import {ProxyPage} from "@/components/proxies/proxy-page";
+import {NetworkPage} from "@/components/network/network-page";
+import {AuditPage} from "@/components/audit/audit-page";
+import {GlobalSearch} from "@/components/search/global-search";
 
 type View = "overview" | "clients" | "proxies" | "network" | "audit";
 
@@ -36,13 +39,21 @@ const nav: Array<{id: View; label: string; icon: typeof Activity}> = [
   {id: "network", label: "网络活动", icon: Cable},
   {id: "audit", label: "事件与审计", icon: Activity},
 ];
-
+const views = new Set<View>(nav.map((item) => item.id));
 const emptyClients: ClientList = {revision: 0, items: [], clients: []};
+
+function viewFromURL(): View {
+  if (typeof window === "undefined") return "overview";
+  const value = new URLSearchParams(window.location.search).get("view") as View | null;
+  return value && views.has(value) ? value : "overview";
+}
 
 export default function Home() {
   const [checking, setChecking] = useState(true);
   const [session, setSession] = useState<AdminSession | null>(null);
-  const [view, setView] = useState<View>("overview");
+  const [view, setView] = useState<View>(viewFromURL);
+  const [navigationKey, setNavigationKey] = useState(0);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [clients, setClients] = useState<ClientList>(emptyClients);
   const [config, setConfig] = useState<ClientFile | null>(null);
@@ -69,6 +80,43 @@ export default function Home() {
     setConfig(configData);
     setEvents(eventData.items.slice(0, 8));
     setSummary(summaryData);
+  }, []);
+
+  const navigate = useCallback((destination: NavigationDestination, replace = false) => {
+    const params = new URLSearchParams();
+    params.set("view", destination.view);
+    for (const [key, value] of Object.entries(destination.params)) {
+      if (value) params.set(key, value);
+    }
+    const target = `${window.location.pathname}?${params}`;
+    if (replace) window.history.replaceState(null, "", target);
+    else window.history.pushState(null, "", target);
+    setView(destination.view);
+    setNavigationKey((value) => value + 1);
+    setMobileNav(false);
+  }, []);
+
+  useEffect(() => {
+    const sync = () => {
+      setView(viewFromURL());
+      setNavigationKey((value) => value + 1);
+    };
+    window.addEventListener("popstate", sync);
+    if (!new URLSearchParams(window.location.search).has("view")) {
+      window.history.replaceState(null, "", `?view=overview`);
+    }
+    return () => window.removeEventListener("popstate", sync);
+  }, []);
+
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
   }, []);
 
   useEffect(() => {
@@ -139,14 +187,6 @@ export default function Home() {
     }
   };
 
-  const openClientNetwork = (clientID: string) => {
-    const params = new URLSearchParams();
-    params.set("network_view", "client");
-    params.set("client_id", clientID);
-    window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
-    setView("network");
-  };
-
   if (checking) return <div className="center-state"><RefreshCw className="spin" aria-label="加载中" /></div>;
   if (!session) return <Login busy={busy} error={error} onSubmit={login} />;
 
@@ -162,7 +202,11 @@ export default function Home() {
         <nav>
           {nav.map((item) => {
             const Icon = item.icon;
-            return <button key={item.id} className={view === item.id ? "nav-item active" : "nav-item"} onClick={() => {setView(item.id); setMobileNav(false);}}><Icon size={18} />{item.label}</button>;
+            return <button
+              key={item.id}
+              className={view === item.id ? "nav-item active" : "nav-item"}
+              onClick={() => navigate({view: item.id, params: {}})}
+            ><Icon size={18} />{item.label}</button>;
           })}
         </nav>
         <div className="sidebar-footer">
@@ -174,17 +218,52 @@ export default function Home() {
         <header className="topbar">
           <button className="icon-button mobile-only" onClick={() => setMobileNav(true)} aria-label="打开导航"><Menu /></button>
           <div><h1>{currentNav.label}</h1><p>配置版本 {config?.revision ?? "-"}</p></div>
+          <button className="icon-button" onClick={() => setSearchOpen(true)} title="全局搜索" aria-label="全局搜索"><Search size={18} /></button>
           {view !== "network" && view !== "audit" && <button className="icon-button" onClick={() => void refresh()} title="刷新" aria-label="刷新"><RefreshCw size={18} /></button>}
         </header>
         {error && <div className="error-banner">{error}<button onClick={() => setError("")} aria-label="关闭"><X size={16} /></button></div>}
         <div className="workspace">
-          {view === "overview" && <OverviewPage summary={summary} clients={clients.items} events={events} onOpenNetwork={openClientNetwork} />}
-          {view === "clients" && <ClientPage data={clients} csrf={session.csrf_token} onRefresh={refresh} onError={setError} />}
-          {view === "proxies" && config && <ProxyPage config={config} busy={busy} onSave={saveConfig} />}
-          {view === "network" && <NetworkPage onUnauthorized={clearSession} />}
-          {view === "audit" && <AuditPage onUnauthorized={clearSession} />}
+          {view === "overview" && <OverviewPage
+            key={navigationKey}
+            summary={summary}
+            clients={clients.items}
+            events={events}
+            onNavigate={navigate}
+            onUnauthorized={clearSession}
+          />}
+          {view === "clients" && <ClientPage
+            key={navigationKey}
+            data={clients}
+            csrf={session.csrf_token}
+            onRefresh={refresh}
+            onError={setError}
+          />}
+          {view === "proxies" && config && <ProxyPage
+            key={navigationKey}
+            config={config}
+            busy={busy}
+            onUnauthorized={clearSession}
+            onSave={saveConfig}
+            onNavigate={navigate}
+          />}
+          {view === "network" && <NetworkPage
+            key={navigationKey}
+            csrf={session.csrf_token}
+            onUnauthorized={clearSession}
+          />}
+          {view === "audit" && <AuditPage
+            key={navigationKey}
+            csrf={session.csrf_token}
+            onUnauthorized={clearSession}
+          />}
         </div>
       </main>
+      <GlobalSearch
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        onNavigate={navigate}
+        onUnauthorized={clearSession}
+      />
     </div>
   );
 }

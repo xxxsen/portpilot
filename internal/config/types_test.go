@@ -135,9 +135,9 @@ func TestAnalyticsObservabilityRetentionValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "geoip reload too frequent",
+			name: "insecure geoip source",
 			mutate: func(value *ObservabilityConfig) {
-				value.GeoIPReloadInterval = (9 * time.Minute).String()
+				value.GeoIPCountrySource = "http://example.com/country.mmdb"
 			},
 		},
 	} {

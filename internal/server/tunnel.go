@@ -371,13 +371,13 @@ func (m *TunnelManager) Reconcile() {
 	runtimes := make(map[string]ProxyRuntime)
 	for _, runtime := range m.app.Listeners.Snapshot() {
 		if runtime.Data.Network == "tcp" {
-			runtimes[runtime.Proxy.ProxyID] = runtime
+			runtimes[proxyRuntimeKey(runtime.ClientID, runtime.Proxy.ProxyID)] = runtime
 		}
 	}
 	var closeItems []*pendingTunnel
 	m.mu.Lock()
 	for id, tunnel := range m.pending {
-		runtime, ok := runtimes[tunnel.ProxyID]
+		runtime, ok := runtimes[proxyRuntimeKey(tunnel.ClientID, tunnel.ProxyID)]
 		allowed := ok
 		if allowed {
 			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())
@@ -397,7 +397,7 @@ func (m *TunnelManager) Reconcile() {
 		}
 	}
 	for _, tunnel := range m.activeTunnels {
-		runtime, ok := runtimes[tunnel.ProxyID]
+		runtime, ok := runtimes[proxyRuntimeKey(tunnel.ClientID, tunnel.ProxyID)]
 		allowed := ok
 		if allowed {
 			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())

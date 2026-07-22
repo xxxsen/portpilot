@@ -88,6 +88,9 @@ func (a *App) adminMux() http.Handler {
 	mux.HandleFunc("PATCH /api/clients/{client_id}", a.requireAdmin(a.requireCSRF(a.handleUpdateClient)))
 	mux.HandleFunc("POST /api/clients/{client_id}/rotate-token", a.requireAdmin(a.requireCSRF(a.handleRotateClientToken)))
 	mux.HandleFunc("POST /api/clients/{client_id}/disconnect", a.requireAdmin(a.requireCSRF(a.handleDisconnect)))
+	mux.HandleFunc("GET /api/search", a.requireAdmin(a.handleSearch))
+	mux.HandleFunc("GET /api/attention", a.requireAdmin(a.handleAttention))
+	mux.HandleFunc("GET /api/proxies/runtime", a.requireAdmin(a.handleProxyRuntime))
 	mux.HandleFunc("GET /api/config", a.requireAdmin(a.handleGetConfig))
 	mux.HandleFunc("PUT /api/config", a.requireAdmin(a.requireCSRF(a.handlePutConfig)))
 	mux.HandleFunc("GET /api/events", a.requireAdmin(a.handleEvents))
@@ -96,10 +99,14 @@ func (a *App) adminMux() http.Handler {
 	mux.HandleFunc("GET /api/network/connections", a.requireAdmin(a.handleNetworkConnections))
 	mux.HandleFunc("GET /api/network/connections/{activity_id}", a.requireAdmin(a.handleNetworkConnectionDetail))
 	mux.HandleFunc("GET /api/network/clients", a.requireAdmin(a.handleNetworkClients))
+	mux.HandleFunc("GET /api/network/analytics/comparison", a.requireAdmin(a.handleNetworkAnalyticsComparison))
 	mux.HandleFunc("GET /api/network/analytics/overview", a.requireAdmin(a.handleNetworkAnalyticsOverview))
 	mux.HandleFunc("GET /api/network/analytics/dimensions", a.requireAdmin(a.handleNetworkAnalyticsDimensions))
 	mux.HandleFunc("GET /api/network/analytics/top-ips", a.requireAdmin(a.handleNetworkAnalyticsTopIPs))
 	mux.HandleFunc("GET /api/network/analytics/ip-series", a.requireAdmin(a.handleNetworkAnalyticsIPSeries))
+	mux.HandleFunc("POST /api/exports/network-connections", a.requireAdmin(a.requireCSRF(a.handleNetworkConnectionsExport)))
+	mux.HandleFunc("POST /api/exports/network-dimensions", a.requireAdmin(a.requireCSRF(a.handleNetworkDimensionsExport)))
+	mux.HandleFunc("POST /api/exports/audit-events", a.requireAdmin(a.requireCSRF(a.handleAuditEventsExport)))
 	mux.HandleFunc("GET /api/metrics/summary", a.requireAdmin(a.handleSummary))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -159,9 +166,12 @@ func (a *App) healthStatus(ctx context.Context, status string) map[string]any {
 	if a.GeoIP != nil {
 		value := a.GeoIP.Status()
 		geoStatus = map[string]any{
-			"status":               value.Status,
+			"status": value.Status, "source_type": value.SourceType,
 			"database_fingerprint": value.DatabaseFingerprint,
-			"last_reload_at":       value.LastReloadAt,
+			"last_reload_at":       value.LastReloadAt, "last_checked_at": value.LastCheckedAt,
+			"last_downloaded_at": value.LastDownloadedAt, "next_check_at": value.NextCheckAt,
+			"stale": value.Stale, "update_state": value.UpdateState,
+			"last_error_code": value.LastErrorCode,
 		}
 	}
 	return map[string]any{
@@ -461,7 +471,28 @@ func (a *App) handleEventDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, event)
 }
 
-func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
+	availability := map[string]int{"disabled": 0, "waiting_client": 0, "degraded": 0, "ready": 0, "error": 0}
+	if a.ProxyStatus != nil {
+		_, _, items := a.ProxyStatus.Snapshot(r.Context())
+		for _, item := range items {
+			availability[item.Availability]++
+		}
+	}
+	attentionCounts := map[string]int{"critical": 0, "warning": 0, "info": 0}
+	if a.Attention != nil {
+		for _, item := range a.Attention.Snapshot(r.Context()) {
+			attentionCounts[item.Severity]++
+		}
+	}
+	var listenerFailures uint64
+	if a.Listeners != nil {
+		listenerFailures = a.Listeners.UnexpectedFailures()
+	}
+	var comparisonCacheHits uint64
+	if a.Events != nil {
+		comparisonCacheHits = a.Events.ComparisonCacheHits()
+	}
 	pending, active := a.Tunnels.Counts()
 	udpChannels, udpPendingChannels, udpFlows := a.UDP.Counts()
 	resources := currentProcessResources()
@@ -481,11 +512,17 @@ func (a *App) handleSummary(w http.ResponseWriter, _ *http.Request) {
 		"goroutines": resources.Goroutines, "open_fds": resources.OpenFDs,
 		"heap_alloc_bytes": resources.HeapAlloc, "heap_inuse_bytes": resources.HeapInuse,
 		"stack_inuse_bytes": resources.StackInuse, "system_memory_bytes": resources.SystemMemory,
-		"network_analytics_metrics":       analyticsMetrics,
-		"network_analytics_query_metrics": a.analytics.snapshot(),
-		"external_access_metrics":         a.access.snapshot(),
-		"geoip_metrics":                   geoIPMetrics,
-		"degraded":                        a.Degraded(),
+		"proxy_availability":                availability,
+		"listener_unexpected_failure_total": listenerFailures,
+		"attention_counts":                  attentionCounts,
+		"search_metrics":                    a.searchStats.snapshot(),
+		"comparison_cache_hits":             comparisonCacheHits,
+		"network_analytics_metrics":         analyticsMetrics,
+		"network_analytics_query_metrics":   a.analytics.snapshot(),
+		"external_access_metrics":           a.access.snapshot(),
+		"geoip_metrics":                     geoIPMetrics,
+		"export_metrics":                    a.exportManager().metrics.snapshot(),
+		"degraded":                          a.Degraded(),
 	})
 }
 

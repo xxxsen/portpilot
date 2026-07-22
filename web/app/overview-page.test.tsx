@@ -35,7 +35,7 @@ const client: ClientView = {
 
 describe("OverviewPage", () => {
   it("shows the last heartbeat and opens the shared client detail drawer", () => {
-    render(<OverviewPage summary={null} clients={[client]} events={[]} onOpenNetwork={vi.fn()} />);
+    render(<OverviewPage summary={null} clients={[client]} events={[]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
     expect(screen.getByText(`心跳 ${new Date(heartbeatAt).toLocaleString()}`)).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Branch A"));
@@ -46,11 +46,11 @@ describe("OverviewPage", () => {
   });
 
   it("opens network activity for the selected client without opening details", () => {
-    const onOpenNetwork = vi.fn();
-    render(<OverviewPage summary={null} clients={[client]} events={[]} onOpenNetwork={onOpenNetwork} />);
+    const onNavigate = vi.fn();
+    render(<OverviewPage summary={null} clients={[client]} events={[]} onNavigate={onNavigate} onUnauthorized={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", {name: "查看 branch-a 网络活动"}));
-    expect(onOpenNetwork).toHaveBeenCalledWith("branch-a");
+    expect(onNavigate).toHaveBeenCalledWith({view: "network", params: {client_id: "branch-a", network_view: "client"}});
     expect(screen.queryByRole("dialog", {name: "Branch A"})).not.toBeInTheDocument();
   });
 });

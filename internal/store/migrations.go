@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -18,10 +17,7 @@ import (
 
 	"github.com/portpilot/portpilot/migrations"
 	"go.uber.org/zap"
-	"modernc.org/sqlite"
 )
-
-const backupRetention = 5
 
 var (
 	migrationsMu sync.RWMutex
@@ -104,11 +100,6 @@ func migrate(ctx context.Context, db *sql.DB, path string, logger *zap.Logger) e
 		}
 		if !found {
 			return fmt.Errorf("applied migration %04d is missing from the binary: %w", version, errMigrationChanged)
-		}
-	}
-	if len(pending) > 0 && len(applied) > 0 {
-		if _, err := backupDatabase(ctx, db, path, "migration", logger); err != nil {
-			return fmt.Errorf("backup before migration: %w", err)
 		}
 	}
 	for _, file := range pending {
@@ -334,7 +325,7 @@ func normalizeSchemaSQL(value string) string {
 	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
-func prepareLegacyDatabase(ctx context.Context, path string, logger *zap.Logger) (string, error) {
+func prepareLegacyDatabase(ctx context.Context, path string, _ *zap.Logger) (string, error) {
 	info, err := os.Stat(path)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && info.Size() == 0) {
 		return "", nil
@@ -371,120 +362,12 @@ func prepareLegacyDatabase(ctx context.Context, path string, logger *zap.Logger)
 	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return "", fmt.Errorf("checkpoint legacy database: %w", err)
 	}
-	backupPath, err := backupDatabase(ctx, db, path, "legacy", logger)
-	if err != nil {
-		return "", fmt.Errorf("backup legacy database: %w", err)
-	}
 	if err := db.Close(); err != nil {
 		return "", fmt.Errorf("close legacy database: %w", err)
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("remove legacy database file %q: %w", path+suffix, err)
-		}
-	}
-	return backupPath, nil
-}
-
-func backupDatabase(ctx context.Context, db *sql.DB, path, reason string, logger *zap.Logger) (string, error) {
-	if path == ":memory:" {
-		return "", nil
-	}
-	if _, err := db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return "", fmt.Errorf("checkpoint database before backup: %w", err)
-	}
-	var pages int
-	if err := db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pages); err != nil {
-		return "", fmt.Errorf("read database page count: %w", err)
-	}
-	if pages == 0 {
-		return "", nil
-	}
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	timestamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	backupPath := filepath.Join(dir, fmt.Sprintf("%s.%s-%s.bak", base, reason, timestamp))
-	if _, err := os.Stat(backupPath); err == nil {
-		return "", fmt.Errorf("backup path already exists: %s", backupPath)
-	}
-	conn, err := db.Conn(ctx)
+	quarantineSet, err := quarantineDatabase(path, time.Now().UTC())
 	if err != nil {
-		return "", fmt.Errorf("reserve database connection for backup: %w", err)
+		return "", fmt.Errorf("quarantine legacy database: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
-	success := false
-	defer func() {
-		if !success {
-			_ = os.Remove(backupPath)
-		}
-	}()
-	if err := conn.Raw(func(driverConn any) error {
-		backuper, ok := driverConn.(interface {
-			NewBackup(string) (*sqlite.Backup, error)
-		})
-		if !ok {
-			return errors.New("sqlite driver does not support online backup")
-		}
-		backup, err := backuper.NewBackup(backupPath)
-		if err != nil {
-			return fmt.Errorf("start online backup: %w", err)
-		}
-		finished := false
-		defer func() {
-			if !finished {
-				_ = backup.Finish()
-			}
-		}()
-		for more := true; more; {
-			if err := ctx.Err(); err != nil {
-				return fmt.Errorf("cancel online backup: %w", err)
-			}
-			more, err = backup.Step(256)
-			if err != nil {
-				return fmt.Errorf("copy online backup pages: %w", err)
-			}
-		}
-		if err := backup.Finish(); err != nil {
-			return fmt.Errorf("finish online backup: %w", err)
-		}
-		finished = true
-		return nil
-	}); err != nil {
-		return "", fmt.Errorf("backup database: %w", err)
-	}
-	if err := os.Chmod(backupPath, 0o600); err != nil {
-		return "", fmt.Errorf("set database backup permissions: %w", err)
-	}
-	success = true
-	logger.Info(
-		"created database backup",
-		zap.String("reason", reason),
-		zap.String("file", filepath.Base(backupPath)),
-	)
-	if err := pruneBackups(dir, base); err != nil {
-		return "", err
-	}
-	return backupPath, nil
-}
-
-func pruneBackups(dir, base string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read database backup directory: %w", err)
-	}
-	var backups []string
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), base+".") || !strings.HasSuffix(entry.Name(), ".bak") {
-			continue
-		}
-		backups = append(backups, filepath.Join(dir, entry.Name()))
-	}
-	sort.Strings(backups)
-	for len(backups) > backupRetention {
-		if err := os.Remove(backups[0]); err != nil {
-			return fmt.Errorf("remove old database backup: %w", err)
-		}
-		backups = backups[1:]
-	}
-	return nil
+	return quarantineSet, nil
 }

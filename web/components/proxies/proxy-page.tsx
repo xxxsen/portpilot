@@ -1,38 +1,182 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Plus, Settings2, Trash2 } from "lucide-react";
-import type { ClientFile, Proxy, TunnelData } from "@/lib/types";
-import { api } from "@/lib/api";
-import { validateProxyDraft } from "@/lib/validation";
-import { AlertDialog, Dialog } from "@/components/ui/dialog";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Pencil,
+  Plus,
+  Settings2,
+  Trash2,
+} from "lucide-react";
+import type {
+  ClientFile,
+  NavigationDestination,
+  Proxy,
+  ProxyRuntime,
+  ProxyRuntimePage,
+  TunnelData,
+} from "@/lib/types";
+import {api, ApiError} from "@/lib/api";
+import {validateProxyDraft} from "@/lib/validation";
+import {AlertDialog, Dialog} from "@/components/ui/dialog";
+import {
+  Availability,
+  ProxyRuntimeDetail,
+} from "@/components/proxies/proxy-runtime-detail";
 
 type Editor = {clientId: string; proxy?: Proxy};
 type AccessPolicy = {allow_cidrs: string[]; deny_cidrs: string[]};
 type AccessPolicyResponse = {global: AccessPolicy};
+const emptyRuntime: ProxyRuntimePage = {
+  revision: 0, snapshot_at: 0, items: [],
+  page: 1, page_size: 25, total: 0, total_pages: 0,
+};
 
 export function ProxyPage({
   config,
   busy,
   onSave,
+  onUnauthorized,
+  onNavigate,
 }: {
   config: ClientFile;
   busy: boolean;
   onSave: (next: ClientFile) => Promise<void>;
+  onUnauthorized: () => void;
+  onNavigate: (destination: NavigationDestination) => void;
 }) {
+  const initial = useMemo(
+    () => typeof window === "undefined"
+      ? new URLSearchParams()
+      : new URLSearchParams(window.location.search),
+    [],
+  );
+  const initialClient = initial.get("client_id") ?? "";
+  const initialProxy = initial.get("proxy_id") ?? "";
+  const initialTarget = initialClient && initialProxy ? runtimeKey(initialClient, initialProxy) : "";
   const [selectedClient, setSelectedClient] = useState("");
   const [editor, setEditor] = useState<Editor | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{clientId: string; proxy: Proxy} | null>(null);
   const [globalAccess, setGlobalAccess] = useState<AccessPolicy>({allow_cidrs: [], deny_cidrs: []});
-  const rows = useMemo(
-    () => config.client_config.flatMap((client) => client.proxy_list.map((proxy) => ({client, proxy}))),
-    [config],
-  );
+  const [runtime, setRuntime] = useState<ProxyRuntimePage>(emptyRuntime);
+  const [runtimePage, setRuntimePage] = useState(1);
+  const [runtimeStale, setRuntimeStale] = useState(false);
+  const [deepLinkError, setDeepLinkError] = useState("");
+  const [targetLookup, setTargetLookup] = useState(initialTarget);
+  const [selectedRuntime, setSelectedRuntime] = useState(initialTarget);
+  const runtimeRequest = useRef<AbortController | null>(null);
+
+  const rows = useMemo(() => runtime.items.map((item) => {
+    const client = config.client_config.find((value) => value.client_id === item.client_id);
+    const proxy = client?.proxy_list.find((value) => value.proxy_id === item.proxy_id);
+    return client && proxy ? {client, proxy, runtime: item} : null;
+  }).filter((value): value is {
+    client: ClientFile["client_config"][number];
+    proxy: Proxy;
+    runtime: ProxyRuntime;
+  } => Boolean(value)), [config, runtime.items]);
+  const detail = runtime.items.find(
+    (item) => runtimeKey(item.client_id, item.proxy_id) === selectedRuntime,
+  ) ?? null;
+  const detailProxy = detail
+    ? config.client_config.find((client) => client.client_id === detail.client_id)
+      ?.proxy_list.find((proxy) => proxy.proxy_id === detail.proxy_id) ?? null
+    : null;
+
   useEffect(() => {
     void api<AccessPolicyResponse>("/api/access-policy")
       .then((result) => setGlobalAccess(result.global))
       .catch(() => undefined);
   }, []);
+
+  const loadRuntime = useCallback(async () => {
+    runtimeRequest.current?.abort();
+    const controller = new AbortController();
+    runtimeRequest.current = controller;
+    try {
+      const params = new URLSearchParams({
+        page: String(targetLookup ? 1 : runtimePage),
+        page_size: "25",
+      });
+      if (targetLookup) {
+        const [clientID, proxyID] = targetLookup.split("\u0000");
+        params.set("client_id", clientID);
+        params.set("query", proxyID);
+      }
+      const value = await api<ProxyRuntimePage>(
+        "/api/proxies/runtime?" + params.toString(),
+        {signal: controller.signal},
+      );
+      setRuntime(value);
+      setRuntimeStale(false);
+      if (targetLookup) {
+        const found = value.items.some(
+          (item) => runtimeKey(item.client_id, item.proxy_id) === targetLookup,
+        );
+        if (found) {
+          setSelectedRuntime(targetLookup);
+          setDeepLinkError("");
+        } else {
+          setSelectedRuntime("");
+          setTargetLookup("");
+          setDeepLinkError("对象不存在或已被删除");
+          const current = new URLSearchParams(window.location.search);
+          current.delete("client_id");
+          current.delete("proxy_id");
+          window.history.replaceState(null, "", window.location.pathname + "?" + current.toString());
+        }
+      }
+      if (value.total_pages > 0 && runtimePage > value.total_pages) {
+        setRuntimePage(value.total_pages);
+      }
+    } catch (caught) {
+      if (controller.signal.aborted) return;
+      if (caught instanceof ApiError && caught.status === 401) onUnauthorized();
+      setRuntimeStale(true);
+    } finally {
+      if (runtimeRequest.current === controller) runtimeRequest.current = null;
+    }
+  }, [onUnauthorized, runtimePage, targetLookup]);
+
+  useEffect(() => {
+    const initialTimer = window.setTimeout(() => void loadRuntime(), 0);
+    let timer: number | undefined;
+    const schedule = () => {
+      if (document.visibilityState === "visible") {
+        timer = window.setInterval(() => void loadRuntime(), 5000);
+      }
+    };
+    const visibility = () => {
+      if (timer) window.clearInterval(timer);
+      timer = undefined;
+      if (document.visibilityState === "visible") {
+        void loadRuntime();
+        schedule();
+      }
+    };
+    schedule();
+    document.addEventListener("visibilitychange", visibility);
+    return () => {
+      window.clearTimeout(initialTimer);
+      if (timer) window.clearInterval(timer);
+      runtimeRequest.current?.abort();
+      document.removeEventListener("visibilitychange", visibility);
+    };
+  }, [loadRuntime]);
+
+  const updateRuntimeURL = (clientID = "", proxyID = "") => {
+    const params = new URLSearchParams(window.location.search);
+    params.set("view", "proxies");
+    if (clientID && proxyID) {
+      params.set("client_id", clientID);
+      params.set("proxy_id", proxyID);
+    } else {
+      params.delete("client_id");
+      params.delete("proxy_id");
+    }
+    window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
+  };
 
   const remove = async () => {
     if (!removeTarget) return;
@@ -42,6 +186,7 @@ export function ProxyPage({
     client.proxy_list = client.proxy_list.filter((item) => item.proxy_id !== removeTarget.proxy.proxy_id);
     await onSave(next);
     setRemoveTarget(null);
+    await loadRuntime();
   };
 
   const toggle = async (clientID: string, proxyID: string) => {
@@ -52,6 +197,7 @@ export function ProxyPage({
     if (!proxy) return;
     proxy.enabled = !proxy.enabled;
     await onSave(next);
+    await loadRuntime();
   };
 
   return (
@@ -59,7 +205,7 @@ export function ProxyPage({
       <div className="section-heading">
         <div><h2>代理监听</h2><p>服务端端口到客户端内网目标</p></div>
         <div className="select-action">
-          <select id="proxy-client" value={selectedClient} onChange={(event) => setSelectedClient(event.target.value)} aria-label="代理客户端筛选">
+          <select id="proxy-client" value={selectedClient} onChange={(event) => setSelectedClient(event.target.value)} aria-label="新增代理所属客户端">
             <option value="">选择客户端</option>
             {config.client_config.map((client) => <option key={client.client_id} value={client.client_id}>{client.remark} · {client.client_id}</option>)}
           </select>
@@ -69,71 +215,97 @@ export function ProxyPage({
             onClick={() => setEditor({clientId: selectedClient})}
             title={config.client_config.length ? "新增代理" : "请先创建客户端"}
             aria-label="新增代理"
-          >
-            <Plus size={18} />
-          </button>
+          ><Plus size={18} /></button>
         </div>
       </div>
-      {!config.client_config.length ? (
-        <div className="empty-state">请先在客户端页面创建客户端</div>
-      ) : (
+      {deepLinkError && <div className="stale-banner">{deepLinkError}</div>}
+      {runtimeStale && <div className="stale-banner">运行状态刷新失败，当前内容可能已过期</div>}
+      {!config.client_config.length ? <div className="empty-state">请先在客户端页面创建客户端</div> : <>
         <div className="table-wrap">
-          <table>
-            <thead><tr><th>代理</th><th>客户端</th><th>协议</th><th>服务端监听</th><th>内网目标</th><th>来源策略</th><th>PROXY</th><th>限速</th><th>承载</th><th>启用</th><th /></tr></thead>
+          <table className="proxy-runtime-table">
+            <thead><tr><th>代理</th><th>客户端</th><th>运行状态</th><th>协议 / 承载</th><th>服务端监听 → 内网目标</th><th>当前活动</th><th>24 小时</th><th>启用</th><th aria-label="操作" /></tr></thead>
             <tbody>
-              {rows.map(({client, proxy}) => (
-                <tr key={`${client.client_id}-${proxy.proxy_id}`}>
-                  <td><button className="link-button" onClick={() => setEditor({clientId: client.client_id, proxy})}>{proxy.remark || proxy.proxy_id}</button><small>{proxy.proxy_id}</small></td>
-                  <td><strong>{client.remark}</strong><small>{client.client_id}</small></td>
-                  <td><span className={`network-tag ${proxy.data.network}`}>{proxy.data.network.toUpperCase()}</span></td>
-                  <td className="mono">{proxy.data.bind}</td>
-                  <td className="mono">{proxy.data.connect}</td>
-                  <td>{accessSummary(proxy.data.access_policy)}</td>
-                  <td>{proxy.data.enable_proxy_protocol ? "v1" : "关闭"}</td>
-                  <td>{rateSummary(proxy.data)}</td>
-                  <td>{proxy.data.transport}</td>
-                  <td>
-                    <label className="switch" title={proxy.enabled ? "停用代理" : "启用代理"}>
-                      <input
-                        type="checkbox"
-                        aria-label={`${proxy.enabled ? "停用" : "启用"} ${proxy.proxy_id}`}
-                        checked={proxy.enabled}
-                        disabled={busy}
-                        onChange={() => void toggle(client.client_id, proxy.proxy_id)}
-                      />
-                      <span />
-                    </label>
-                  </td>
-                  <td><button className="icon-button danger" onClick={() => setRemoveTarget({clientId: client.client_id, proxy})} title="删除代理" aria-label={`删除 ${proxy.proxy_id}`}><Trash2 size={17} /></button></td>
-                </tr>
-              ))}
-              {!rows.length && <tr><td colSpan={11}><div className="empty-inline">暂无代理规则</div></td></tr>}
+              {rows.map(({client, proxy, runtime: item}) => <tr
+                key={`${client.client_id}-${proxy.proxy_id}`}
+                className={`clickable-row proxy-runtime-row ${selectedRuntime === runtimeKey(client.client_id, proxy.proxy_id) ? "selected-row" : ""}`}
+                onClick={() => {
+                  setDeepLinkError("");
+                  setSelectedRuntime(runtimeKey(client.client_id, proxy.proxy_id));
+                  updateRuntimeURL(client.client_id, proxy.proxy_id);
+                }}
+              >
+                <td><strong>{proxy.remark || proxy.proxy_id}</strong><small>{proxy.proxy_id}</small></td>
+                <td><strong>{client.remark || client.client_id}</strong><small>{client.client_id}</small></td>
+                <td><Availability value={item.availability} /><small>{item.reason_code}</small></td>
+                <td><span className={`network-tag ${item.protocol}`}>{item.protocol.toUpperCase()}</span><small>{item.transport} → {item.effective_transport}</small></td>
+                <td className="proxy-route-cell"><span className="mono">{item.bind}</span><small className="mono">{item.connect}</small></td>
+                <td className="stable-number"><strong>{item.realtime.active_connections}</strong><small>↑ {formatRuntimeRate(item.realtime.up_bytes_per_second)} · ↓ {formatRuntimeRate(item.realtime.down_bytes_per_second)}</small></td>
+                <td className="stable-number">{item.history.connections === null ? "-" : item.history.connections}<small>{item.history.failure_rate === null ? "历史不可用" : `失败 ${(item.history.failure_rate * 100).toFixed(1)}%`}</small></td>
+                <td onClick={(event) => event.stopPropagation()}>
+                  <label className="switch" title={proxy.enabled ? "停用代理" : "启用代理"}>
+                    <input
+                      type="checkbox"
+                      aria-label={`${proxy.enabled ? "停用" : "启用"} ${proxy.proxy_id}`}
+                      checked={proxy.enabled}
+                      disabled={busy}
+                      onChange={() => void toggle(client.client_id, proxy.proxy_id)}
+                    />
+                    <span />
+                  </label>
+                </td>
+                <td className="table-actions" onClick={(event) => event.stopPropagation()}>
+                  <button className="icon-button" onClick={() => setEditor({clientId: client.client_id, proxy})} title="编辑代理" aria-label={`编辑 ${proxy.proxy_id}`}><Pencil size={16} /></button>
+                  <button className="icon-button danger" onClick={() => setRemoveTarget({clientId: client.client_id, proxy})} title="删除代理" aria-label={`删除 ${proxy.proxy_id}`}><Trash2 size={16} /></button>
+                </td>
+              </tr>)}
+              {!rows.length && <tr><td colSpan={9}><div className="empty-inline">{runtime.snapshot_at ? "暂无代理规则" : "正在加载运行状态"}</div></td></tr>}
             </tbody>
           </table>
         </div>
-      )}
-      {editor && (
-        <ProxyEditor
-          editor={editor}
-          config={config}
-          globalAccess={globalAccess}
-          busy={busy}
-          onClose={() => setEditor(null)}
-          onSave={async (clientID, proxy) => {
-            const next = structuredClone(config);
-            const client = next.client_config.find((item) => item.client_id === clientID);
-            if (!client) return;
-            const index = client.proxy_list.findIndex((item) => item.proxy_id === proxy.proxy_id);
-            if (index >= 0) client.proxy_list[index] = proxy;
-            else client.proxy_list.push(proxy);
-            await onSave(next);
-            setEditor(null);
-          }}
-        />
-      )}
+        <div className="pagination">
+          <span>共 {runtime.total} 条</span>
+          <button className="icon-button" disabled={runtimePage <= 1} onClick={() => setRuntimePage((value) => value - 1)} aria-label="代理上一页"><ChevronLeft size={17} /></button>
+          <span>{runtimePage} / {Math.max(runtime.total_pages, 1)}</span>
+          <button className="icon-button" disabled={runtimePage >= runtime.total_pages} onClick={() => setRuntimePage((value) => value + 1)} aria-label="代理下一页"><ChevronRight size={17} /></button>
+        </div>
+      </>}
+      {editor && <ProxyEditor
+        editor={editor}
+        config={config}
+        globalAccess={globalAccess}
+        busy={busy}
+        onClose={() => setEditor(null)}
+        onSave={async (clientID, proxy) => {
+          const next = structuredClone(config);
+          const client = next.client_config.find((item) => item.client_id === clientID);
+          if (!client) return;
+          const index = client.proxy_list.findIndex((item) => item.proxy_id === proxy.proxy_id);
+          if (index >= 0) client.proxy_list[index] = proxy;
+          else client.proxy_list.push(proxy);
+          await onSave(next);
+          setEditor(null);
+          await loadRuntime();
+        }}
+      />}
+      <ProxyRuntimeDetail
+        runtime={detail}
+        proxy={detailProxy}
+        onClose={() => {
+          setSelectedRuntime("");
+          setTargetLookup("");
+          updateRuntimeURL();
+        }}
+        onOpenNetwork={(clientID, proxyID) => onNavigate({
+          view: "network",
+          params: {
+            network_view: "client", network_section: "insights",
+            client_id: clientID, proxy_id: proxyID,
+          },
+        })}
+      />
       <AlertDialog
         open={Boolean(removeTarget)}
-        onOpenChange={(open) => { if (!open && !busy) setRemoveTarget(null); }}
+        onOpenChange={(open) => {if (!open && !busy) setRemoveTarget(null);}}
         title="删除代理规则"
         description={`删除 ${removeTarget?.proxy.remark || removeTarget?.proxy.proxy_id || ""} 后，服务端将停止对应监听。`}
         confirmLabel="确认删除"
@@ -142,6 +314,12 @@ export function ProxyPage({
       />
     </section>
   );
+}
+
+function formatRuntimeRate(value: number) {
+  if (value < 1024) return `${value} B/s`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB/s`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MiB/s`;
 }
 
 function ProxyEditor({
@@ -323,22 +501,8 @@ function cidrLines(value: string) {
   return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
-function accessSummary(policy?: AccessPolicy) {
-  if (!policy || (!policy.allow_cidrs.length && !policy.deny_cidrs.length)) return "继承全局";
-  return `允许 ${policy.allow_cidrs.length || "全部"} · 拒绝 ${policy.deny_cidrs.length}`;
-}
-
-function rateSummary(data: TunnelData) {
-  const up = data.rate_limit?.up_bytes_per_second ?? 0;
-  const down = data.rate_limit?.down_bytes_per_second ?? 0;
-  return `↑ ${formatLimit(up)} · ↓ ${formatLimit(down)}`;
-}
-
-function formatLimit(value: number) {
-  if (!value) return "不限";
-  if (value >= 2 ** 30) return `${value / 2 ** 30} GiB/s`;
-  if (value >= 2 ** 20) return `${value / 2 ** 20} MiB/s`;
-  return `${value / 2 ** 10} KiB/s`;
+function runtimeKey(clientID: string, proxyID: string) {
+  return clientID + "\u0000" + proxyID;
 }
 
 function rateUnit(value: number) {

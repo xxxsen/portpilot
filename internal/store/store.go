@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/xxxsen/common/logutil"
 	"go.uber.org/zap"
@@ -18,14 +21,146 @@ import (
 )
 
 type Store struct {
-	db               *sql.DB
-	degraded         atomic.Bool
-	analyticsVersion atomic.Uint64
-	analyticsCacheMu sync.RWMutex
-	analyticsCache   map[analyticsCacheKey]any
+	db                  *sql.DB
+	degraded            atomic.Bool
+	analyticsVersion    atomic.Uint64
+	analyticsCacheMu    sync.RWMutex
+	analyticsCache      map[analyticsCacheKey]any
+	comparisonCacheHits atomic.Uint64
 }
 
+var errIntegrityFailed = errors.New("database integrity validation failed")
+
 func Open(path string, logger *zap.Logger) (*Store, error) {
+	if logger == nil {
+		logger = logutil.GetLogger(context.Background())
+	}
+	hadDatabase := false
+	if path != ":memory:" {
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			hadDatabase = true
+		}
+	}
+	opened, err := openOnce(path, logger)
+	if err == nil || !hadDatabase || path == ":memory:" {
+		return opened, err
+	}
+	reason := rebuildReason(err)
+	if reason == "" {
+		return nil, err
+	}
+	quarantineSet, quarantineErr := quarantineDatabase(path, time.Now().UTC())
+	if quarantineErr != nil {
+		return nil, fmt.Errorf("quarantine observability database after %s: %w", reason, quarantineErr)
+	}
+	rebuilt, rebuildErr := openOnce(path, logger)
+	if rebuildErr != nil {
+		return nil, fmt.Errorf("rebuild observability database after %s: %w", reason, rebuildErr)
+	}
+	version, versionErr := rebuilt.SchemaVersion(context.Background())
+	if versionErr != nil {
+		_ = rebuilt.Close()
+		return nil, versionErr
+	}
+	if _, auditErr := rebuilt.WriteAudit(context.Background(), AuditEvent{
+		Category: "system", EventType: "database_rebuilt", Outcome: "success",
+		ActorType: "system", Summary: "重建可观测性数据库", ReasonCode: reason,
+		Details: map[string]any{
+			"quarantine_set": quarantineSet, "migration_version": version,
+		},
+	}); auditErr != nil {
+		_ = rebuilt.Close()
+		return nil, fmt.Errorf("audit database rebuild: %w", auditErr)
+	}
+	logger.Warn("rebuilt disposable observability database", zap.String("reason_code", reason))
+	return rebuilt, nil
+}
+
+func rebuildReason(err error) string {
+	switch {
+	case errors.Is(err, errMigrationChanged):
+		return "checksum_mismatch"
+	case errors.Is(err, errSchemaDrift):
+		return "schema_drift"
+	case errors.Is(err, errIntegrityFailed):
+		return "integrity_failed"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "database disk image is malformed") ||
+		strings.Contains(message, "file is not a database") {
+		return "database_corrupt"
+	}
+	return ""
+}
+
+func quarantineDatabase(path string, now time.Time) (string, error) {
+	dir := filepath.Join(filepath.Dir(path), "quarantine")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create quarantine directory: %w", err)
+	}
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("quarantine path must be a real directory")
+	}
+	set := "portpilot-" + now.Format("20060102T150405.000000000Z") + ".db"
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		source := path + suffix
+		if _, err := os.Lstat(source); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", fmt.Errorf("inspect database component: %w", err)
+		}
+		target := filepath.Join(dir, set+suffix)
+		if err := os.Rename(source, target); err != nil {
+			return "", fmt.Errorf("move database component to quarantine: %w", err)
+		}
+	}
+	if err := pruneQuarantine(dir, now); err != nil {
+		return "", err
+	}
+	return set, nil
+}
+
+func pruneQuarantine(dir string, now time.Time) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read quarantine directory: %w", err)
+	}
+	type setInfo struct {
+		name    string
+		modTime time.Time
+	}
+	sets := make([]setInfo, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "portpilot-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return fmt.Errorf("inspect quarantine set: %w", infoErr)
+		}
+		sets = append(sets, setInfo{name: name, modTime: info.ModTime()})
+	}
+	sort.Slice(sets, func(i, j int) bool {
+		if sets[i].modTime.Equal(sets[j].modTime) {
+			return sets[i].name < sets[j].name
+		}
+		return sets[i].modTime.Before(sets[j].modTime)
+	})
+	for index, set := range sets {
+		if len(sets)-index <= 2 && now.Sub(set.modTime) <= 7*24*time.Hour {
+			continue
+		}
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := os.Remove(filepath.Join(dir, set.name+suffix)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove expired quarantine component: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func openOnce(path string, logger *zap.Logger) (*Store, error) {
 	if logger == nil {
 		logger = logutil.GetLogger(context.Background())
 	}
@@ -78,7 +213,7 @@ func Open(path string, logger *zap.Logger) (*Store, error) {
 			ActorType: "system", Summary: "重建旧版可观测性数据库",
 			ReasonCode: "legacy_schema",
 			Details: map[string]any{
-				"backup_file": filepath.Base(legacyBackup), "migration_version": version,
+				"quarantine_set": legacyBackup, "migration_version": version,
 			},
 		}); auditErr != nil {
 			_ = store.Close()
@@ -91,17 +226,17 @@ func Open(path string, logger *zap.Logger) (*Store, error) {
 func validateDatabase(ctx context.Context, db *sql.DB) error {
 	var integrity string
 	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
-		return fmt.Errorf("run database integrity check: %w", err)
+		return fmt.Errorf("run database integrity check: %w: %w", errIntegrityFailed, err)
 	}
 	if integrity != "ok" {
-		return fmt.Errorf("database integrity check failed: %s", integrity)
+		return fmt.Errorf("%w: %s", errIntegrityFailed, integrity)
 	}
 	var foreignKeyViolations int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&foreignKeyViolations); err != nil {
-		return fmt.Errorf("run database foreign key check: %w", err)
+		return fmt.Errorf("run database foreign key check: %w: %w", errIntegrityFailed, err)
 	}
 	if foreignKeyViolations != 0 {
-		return fmt.Errorf("database foreign key check found %d violation(s)", foreignKeyViolations)
+		return fmt.Errorf("%w: foreign key check found %d violation(s)", errIntegrityFailed, foreignKeyViolations)
 	}
 	return nil
 }

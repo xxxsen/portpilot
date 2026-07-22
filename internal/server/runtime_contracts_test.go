@@ -23,11 +23,11 @@ func TestRuntimeMapAppliesDefaultTransportOnlyWhenOmitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtimes["omitted"].Data.Transport != "direct" {
-		t.Fatalf("omitted transport did not inherit server default: %#v", runtimes["omitted"].Data)
+	if runtimes[proxyRuntimeKey("client", "omitted")].Data.Transport != "direct" {
+		t.Fatalf("omitted transport did not inherit server default: %#v", runtimes[proxyRuntimeKey("client", "omitted")].Data)
 	}
-	if runtimes["explicit"].Data.Transport != "auto" {
-		t.Fatalf("explicit auto transport was overwritten: %#v", runtimes["explicit"].Data)
+	if runtimes[proxyRuntimeKey("client", "explicit")].Data.Transport != "auto" {
+		t.Fatalf("explicit auto transport was overwritten: %#v", runtimes[proxyRuntimeKey("client", "explicit")].Data)
 	}
 }
 

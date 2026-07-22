@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/config"
@@ -21,17 +22,33 @@ type ProxyRuntime struct {
 	Access       accesspolicy.Policy
 }
 
+type ListenerObservation struct {
+	State         string `json:"state"`
+	BoundAt       int64  `json:"bound_at"`
+	LastAcceptAt  int64  `json:"last_accept_at"`
+	FailedAt      int64  `json:"failed_at"`
+	LastErrorCode string `json:"last_error_code"`
+	LastError     string `json:"last_error"`
+}
+
 type ListenerHandle struct {
-	runtime atomic.Pointer[ProxyRuntime]
-	tcp     net.Listener
-	udp     *net.UDPConn
-	closed  atomic.Bool
+	runtime       atomic.Pointer[ProxyRuntime]
+	state         atomic.Pointer[string]
+	boundAt       atomic.Int64
+	lastAcceptAt  atomic.Int64
+	failedAt      atomic.Int64
+	lastErrorCode atomic.Pointer[string]
+	lastError     atomic.Pointer[string]
+	tcp           net.Listener
+	udp           *net.UDPConn
+	closed        atomic.Bool
 }
 
 type ListenerManager struct {
-	app     *App
-	mu      sync.RWMutex
-	handles map[string]*ListenerHandle
+	app                *App
+	mu                 sync.RWMutex
+	handles            map[string]*ListenerHandle
+	unexpectedFailures atomic.Uint64
 }
 
 func NewListenerManager(app *App) *ListenerManager {
@@ -47,11 +64,11 @@ func (m *ListenerManager) Prepare(file config.ClientFile) (func(), func(), error
 	}
 	staged := make(map[string]*ListenerHandle)
 	reused := make(map[string]*ListenerHandle)
-	for proxyID, runtime := range desired {
-		if existing := m.handles[proxyID]; existing != nil {
+	for key, runtime := range desired {
+		if existing := m.handles[key]; existing != nil {
 			current := existing.runtime.Load()
 			if current != nil && current.Data.Network == runtime.Data.Network && current.Data.Bind == runtime.Data.Bind {
-				reused[proxyID] = existing
+				reused[key] = existing
 				continue
 			}
 		}
@@ -61,9 +78,9 @@ func (m *ListenerManager) Prepare(file config.ClientFile) (func(), func(), error
 				item.close()
 			}
 			m.mu.Unlock()
-			return nil, nil, fmt.Errorf("bind proxy %s: %w", proxyID, bindErr)
+			return nil, nil, fmt.Errorf("bind proxy %s: %w", key, bindErr)
 		}
-		staged[proxyID] = handle
+		staged[key] = handle
 	}
 	var once sync.Once
 	unlock := func() { once.Do(m.mu.Unlock) }
@@ -75,21 +92,21 @@ func (m *ListenerManager) Prepare(file config.ClientFile) (func(), func(), error
 	}
 	commit := func() {
 		next := make(map[string]*ListenerHandle, len(desired))
-		for proxyID, runtime := range desired {
-			if handle := reused[proxyID]; handle != nil {
+		for key, runtime := range desired {
+			if handle := reused[key]; handle != nil {
 				copy := runtime
 				handle.runtime.Store(&copy)
-				next[proxyID] = handle
+				next[key] = handle
 				continue
 			}
-			handle := staged[proxyID]
-			next[proxyID] = handle
+			handle := staged[key]
+			next[key] = handle
 			go m.serve(handle)
 		}
 		previous := m.handles
 		m.handles = next
-		for proxyID, handle := range previous {
-			if next[proxyID] != handle {
+		for key, handle := range previous {
+			if next[key] != handle {
 				handle.close()
 			}
 		}
@@ -101,6 +118,7 @@ func (m *ListenerManager) Prepare(file config.ClientFile) (func(), func(), error
 func (m *ListenerManager) bind(runtime ProxyRuntime) (*ListenerHandle, error) {
 	copy := runtime
 	handle := &ListenerHandle{}
+	handle.setState("stopped")
 	handle.runtime.Store(&copy)
 	switch runtime.Data.Network {
 	case "tcp":
@@ -122,6 +140,8 @@ func (m *ListenerManager) bind(runtime ProxyRuntime) (*ListenerHandle, error) {
 	default:
 		return nil, errors.New("unsupported network")
 	}
+	handle.boundAt.Store(time.Now().UTC().UnixMilli())
+	handle.setState("listening")
 	return handle, nil
 }
 
@@ -138,10 +158,13 @@ func (m *ListenerManager) serveTCP(handle *ListenerHandle) {
 		conn, err := handle.tcp.Accept()
 		if err != nil {
 			if !handle.closed.Load() {
+				m.unexpectedFailures.Add(1)
+				handle.fail("listener_failed", err)
 				m.app.Logger.Error("proxy TCP accept failed", zap.Error(err))
 			}
 			return
 		}
+		handle.lastAcceptAt.Store(time.Now().UTC().UnixMilli())
 		runtime := handle.runtime.Load()
 		if runtime == nil {
 			_ = conn.Close()
@@ -167,10 +190,13 @@ func (m *ListenerManager) serveUDP(handle *ListenerHandle) {
 		n, address, err := handle.udp.ReadFromUDP(buffer)
 		if err != nil {
 			if !handle.closed.Load() {
+				m.unexpectedFailures.Add(1)
+				handle.fail("listener_failed", err)
 				m.app.Logger.Error("proxy UDP read failed", zap.Error(err))
 			}
 			return
 		}
+		handle.lastAcceptAt.Store(time.Now().UTC().UnixMilli())
 		runtime := handle.runtime.Load()
 		if runtime == nil {
 			continue
@@ -188,10 +214,10 @@ func (m *ListenerManager) serveUDP(handle *ListenerHandle) {
 	}
 }
 
-func (m *ListenerManager) UDPListener(proxyID string) *net.UDPConn {
+func (m *ListenerManager) UDPListener(clientID, proxyID string) *net.UDPConn {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	handle := m.handles[proxyID]
+	handle := m.handles[proxyRuntimeKey(clientID, proxyID)]
 	if handle == nil {
 		return nil
 	}
@@ -210,6 +236,10 @@ func (m *ListenerManager) Snapshot() []ProxyRuntime {
 	return result
 }
 
+func (m *ListenerManager) UnexpectedFailures() uint64 {
+	return m.unexpectedFailures.Load()
+}
+
 func (m *ListenerManager) Close() {
 	m.mu.Lock()
 	handles := m.handles
@@ -221,6 +251,7 @@ func (m *ListenerManager) Close() {
 }
 
 func (h *ListenerHandle) close() {
+	h.setState("stopped")
 	if !h.closed.CompareAndSwap(false, true) {
 		return
 	}
@@ -230,6 +261,52 @@ func (h *ListenerHandle) close() {
 	if h.udp != nil {
 		_ = h.udp.Close()
 	}
+}
+
+func (h *ListenerHandle) setState(value string) {
+	h.state.Store(&value)
+}
+
+func (h *ListenerHandle) fail(code string, err error) {
+	message := err.Error()
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	h.failedAt.Store(time.Now().UTC().UnixMilli())
+	h.lastErrorCode.Store(&code)
+	h.lastError.Store(&message)
+	h.setState("error")
+}
+
+func (h *ListenerHandle) observation() ListenerObservation {
+	value := ListenerObservation{
+		State: "stopped", BoundAt: h.boundAt.Load(), LastAcceptAt: h.lastAcceptAt.Load(),
+		FailedAt: h.failedAt.Load(),
+	}
+	if state := h.state.Load(); state != nil {
+		value.State = *state
+	}
+	if code := h.lastErrorCode.Load(); code != nil {
+		value.LastErrorCode = *code
+	}
+	if message := h.lastError.Load(); message != nil {
+		value.LastError = *message
+	}
+	return value
+}
+
+func (m *ListenerManager) ObservationSnapshot() map[string]ListenerObservation {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	result := make(map[string]ListenerObservation, len(m.handles))
+	for key, handle := range m.handles {
+		result[key] = handle.observation()
+	}
+	return result
+}
+
+func proxyRuntimeKey(clientID, proxyID string) string {
+	return clientID + "\x00" + proxyID
 }
 
 func runtimeMap(file config.ClientFile, defaultTransport string) (map[string]ProxyRuntime, error) {
@@ -252,7 +329,7 @@ func runtimeMap(file config.ClientFile, defaultTransport string) (map[string]Pro
 			if data.Network == "tcp" && !data.TransportExplicit {
 				data.Transport = defaultTransport
 			}
-			result[proxy.ProxyID] = ProxyRuntime{
+			result[proxyRuntimeKey(client.ClientID, proxy.ProxyID)] = ProxyRuntime{
 				ClientID: client.ClientID, ClientRemark: client.Remark,
 				Proxy: proxy, Data: data, Access: accesspolicy.Compile(data.AccessPolicy),
 			}

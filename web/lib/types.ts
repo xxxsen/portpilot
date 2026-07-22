@@ -349,3 +349,167 @@ export type Summary = {
   udp_flows: number;
   degraded: boolean;
 };
+
+export type ProxyListenerStatus = {
+  state: "stopped" | "listening" | "error";
+  bound_at: number;
+  last_accept_at: number;
+  failed_at: number;
+  last_error_code: string;
+  last_error: string;
+};
+
+export type ProxySessionStatus = {
+  current: boolean;
+  state: string;
+  last_seen_at: number;
+  control_rtt_millis: number;
+  mux_sessions: number;
+  active_streams: number;
+};
+
+export type ProxyRuntime = {
+  client_id: string;
+  client_remark: string;
+  proxy_id: string;
+  proxy_remark: string;
+  enabled: boolean;
+  protocol: "tcp" | "udp";
+  transport: string;
+  effective_transport: string;
+  bind: string;
+  connect: string;
+  availability: "disabled" | "waiting_client" | "degraded" | "ready" | "error";
+  reason_code: string;
+  listener: ProxyListenerStatus;
+  session: ProxySessionStatus;
+  realtime: {
+    active_connections: number;
+    pending_connections: number;
+    up_bytes_per_second: number;
+    down_bytes_per_second: number;
+  };
+  history: {
+    status: "ready" | "unavailable";
+    range: "24h";
+    connections: number | null;
+    failures: number | null;
+    failure_rate: number | null;
+    up_bytes: number | null;
+    down_bytes: number | null;
+    last_activity_at: number | null;
+    last_failure_at: number | null;
+    last_failure_reason_code: string;
+  };
+};
+
+export type ProxyRuntimePage = Page<ProxyRuntime> & {
+  revision: number;
+  snapshot_at: number;
+};
+
+export type NavigationDestination = {
+  view: "overview" | "clients" | "proxies" | "network" | "audit";
+  params: Record<string, string>;
+};
+
+export type AttentionItem = {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  kind: string;
+  title: string;
+  summary: string;
+  first_observed_at: number;
+  updated_at: number;
+  client_id: string;
+  proxy_id: string;
+  count: number;
+  destination: NavigationDestination;
+};
+
+export type AttentionResponse = {
+  snapshot_at: number;
+  items: AttentionItem[];
+  total: number;
+  counts: {critical: number; warning: number; info: number};
+};
+
+export type SearchItem = {
+  type: "client" | "proxy" | "source_ip" | "activity";
+  id: string;
+  title: string;
+  subtitle: string;
+  score: number;
+  destination: NavigationDestination;
+};
+
+export type SearchResponse = {
+  query: string;
+  items: SearchItem[];
+  partial: boolean;
+  unavailable_sources: string[];
+};
+
+export type MetricChange = {
+  current: number;
+  previous: number;
+  absolute_change: number;
+  relative_change: number | null;
+  state: "unchanged" | "new" | "inactive" | "increased" | "decreased";
+  estimated: boolean;
+};
+
+export type ComparisonMetrics = {
+  connections: MetricChange;
+  failures: MetricChange;
+  failure_rate: MetricChange;
+  unique_ips: MetricChange;
+  up_bytes: MetricChange;
+  down_bytes: MetricChange;
+  total_bytes: MetricChange;
+};
+
+export type AlignedAnalyticsPoint = AnalyticsPoint & {
+  aligned_bucket_at: number;
+};
+
+export type RankChange = {
+  source_ip: string;
+  geo_kind: string;
+  country_code: string;
+  current_rank: number | null;
+  previous_rank: number | null;
+  rank_change: number | null;
+  status: "new" | "up" | "down" | "same" | "departed";
+};
+
+export type ProxyChangeSignal = {
+  client_id: string;
+  proxy_id: string;
+  protocol: string;
+  signals: string[];
+  current_connections: number;
+  previous_connections: number;
+  current_failure_rate: number;
+  previous_failure_rate: number;
+  current_traffic: number;
+  previous_traffic: number;
+};
+
+export type ComparisonSource = AnalyticsTopIP;
+
+export type AnalyticsComparison = {
+  current: AnalyticsMetadata;
+  previous: AnalyticsMetadata;
+  comparable: boolean;
+  reason: string;
+  metrics: ComparisonMetrics;
+  current_series: AnalyticsPoint[];
+  previous_series: AlignedAnalyticsPoint[];
+  new_source_count: number;
+  new_sources: ComparisonSource[];
+  new_countries: string[];
+  connections_rank_changes: RankChange[];
+  traffic_rank_changes: RankChange[];
+  proxy_changes: ProxyChangeSignal[];
+};

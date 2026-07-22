@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, Copy, Info, KeyRound, Pencil, Plus, Server, Unplug } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { ClientList, ClientView } from "@/lib/types";
@@ -26,7 +26,23 @@ export function ClientPage({
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [detail, setDetail] = useState<ClientView | null>(null);
+  const initialClientID = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("client_id") ?? "";
+  const [detail, setDetail] = useState<ClientView | null>(() => data.items.find((client) => client.client_id === initialClientID) ?? null);
+
+  const updateDetailURL = (clientID = "") => {
+    const params = new URLSearchParams(window.location.search);
+    params.set("view", "clients");
+    if (clientID) params.set("client_id", clientID);
+    else params.delete("client_id");
+    window.history.replaceState(null, "", `?`);
+  };
+
+  useEffect(() => {
+    if (!initialClientID || detail) return;
+    updateDetailURL();
+    const timer = window.setTimeout(() => onError("对象不存在或已被删除"), 0);
+    return () => window.clearTimeout(timer);
+  }, [detail, initialClientID, onError]);
 
   const mutationError = async (caught: unknown) => {
     if (caught instanceof ApiError && caught.status === 409) {
@@ -101,7 +117,7 @@ export function ClientPage({
                 <time title={utcTime(client.updated_at)}>修改 {localTime(client.updated_at)}</time>
               </div>
             </div>
-            <button className="icon-button" onClick={() => setDetail(client)} title="客户端详情" aria-label={`查看 ${client.client_id} 详情`}>
+            <button className="icon-button" onClick={() => {setDetail(client); updateDetailURL(client.client_id);}} title="客户端详情" aria-label={`查看 ${client.client_id} 详情`}>
               <Info size={17} />
             </button>
             <button className="icon-button" onClick={() => setEditor({mode: "edit", client})} title="编辑客户端" aria-label={`编辑 ${client.client_id}`}>
@@ -147,7 +163,7 @@ export function ClientPage({
         busy={busy}
         onConfirm={() => void rotateToken()}
       />
-      <ClientDetailDialog client={detail} onClose={() => setDetail(null)} />
+      <ClientDetailDialog client={detail} onClose={() => {setDetail(null); updateDetailURL();}} />
       <Dialog
         open={Boolean(oneTimeToken)}
         onOpenChange={() => undefined}

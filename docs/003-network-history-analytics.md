@@ -128,9 +128,10 @@ rollup 和幂等标记同事务提交。重试、服务重启和后台回填对�
 
 ## 4. GeoIP
 
-GeoIP 只做离线国家级分类，reader 使用
-`github.com/oschwald/maxminddb-golang/v2`。PortPilot 不下载、不分发 MMDB，也不向在线服务发送
-来源 IP。
+GeoIP 只做国家级分类，reader 使用 `github.com/oschwald/maxminddb-golang/v2`。来源 IP 仅在本地
+MMDB 中查询，不会发送给 GeoIP 下载地址或在线查询服务。`geoip_country_source` 可以是本地 MMDB
+路径或远程 HTTPS source；完整下载、更新和 cache 生命周期见
+[`004-operational-insights-and-navigation.md`](004-operational-insights-and-navigation.md)。
 
 地址分类为：
 
@@ -139,35 +140,35 @@ GeoIP 只做离线国家级分类，reader 使用
 | `country` | MMDB 命中的两位大写国家代码 |
 | `private` | loopback 或私网地址 |
 | `reserved` | unspecified、link-local、multicast、文档网段等保留地址 |
-| `unknown` | 未配置 MMDB或公共地址未命中 |
+| `unknown` | 未配置 MMDB 或公共地址未命中 |
 | `invalid` | 无法解析 |
 
 ### 4.1 查询与缓存
 
-MMDB 本身是内存映射的二进制索引。PortPilot 直接调用 reader 查询，并使用有界进程内 LRU
-吸收重复 IP；不建立 SQLite GeoIP 点查缓存。
+MMDB 是内存映射的二进制索引。PortPilot 直接调用 reader，并使用有界进程内 LRU 吸收重复 IP；
+不建立 SQLite GeoIP 点查缓存。
 
-终态聚合把以下分类信息固化到 rollup：
+终态聚合把 `geo_kind`、`country_code` 和 `geo_database_fingerprint` 固化到 rollup。国家汇总无需
+在页面请求中逐 IP 查询 MMDB；数据库更新只影响后续终态连接，已有历史贡献保留当时分类和
+fingerprint，不执行全库重写。
 
-```text
-geo_kind
-country_code
-geo_database_fingerprint
-```
+### 4.2 Source、启动与热更新
 
-这样国家汇总无需在页面请求中逐 IP 查询 MMDB。MMDB 更新影响后续终态连接；已有历史贡献保留
-当时分类和 fingerprint，不执行全库重写。
-
-### 4.2 启动与热重载
-
-- 配置路径非空时，文件缺失、不可读、格式错误或不含 Country 数据都会使服务启动失败。
-- reload worker 按 SHA-256 短 fingerprint 判断变化。
-- 新 reader 完整打开并校验后通过原子指针替换。
-- lookup 使用引用计数快照，不持有全局 reader 锁。
-- 旧 reader 等最后一个 lookup 释放后关闭。
-- 重载失败保留最近一次可用 reader，健康状态为 `degraded`。
+- 空 source 关闭公共 IP 国家分类。
+- 本地 source 缺失、不可读、格式错误或不含 Country 数据会使服务启动失败；文件变化时校验并
+  原子交换 reader。
+- 远程 source 只允许 HTTPS。服务优先装载 cache 中的有效 MMDB；无 reader 时进入 degraded 并
+  在后台下载，不阻断控制面、listener 或数据面。
+- 远程数据库每 7 天条件检查一次；失败按 1 小时到 24 小时退避，现有有效 reader 继续使用。
+- 下载只接受 raw MMDB 或包含唯一 MMDB 的 tar.gz；ZIP/CSV 不能由 reader 直接查询并被拒绝。
+- 新 reader 完整校验后原子替换；lookup 使用引用计数快照，旧 reader 在最后一个引用释放后关闭。
+- source URL、query、下载凭据、cache 路径和底层错误不进入健康、metrics、审计或普通日志。
 
 ## 5. 配置与保留
+
+服务端主配置使用 `cache_dir` 作为 SQLite 和远程 GeoIP 等派生数据的易失缓存根目录。SQLite
+固定为 `<cache_dir>/portpilot.db`；不再提供独立数据库路径。`cache_dir` 为空时使用进程专用系统
+临时目录，并在正常关闭时删除。
 
 服务端 `observability` 包含：
 
@@ -175,8 +176,7 @@ geo_database_fingerprint
 {
   "network_statistics_retention": "2160h",
   "network_fine_rollup_retention": "48h",
-  "geoip_country_database": "",
-  "geoip_reload_interval": "1h"
+  "geoip_country_source": ""
 }
 ```
 
@@ -184,9 +184,9 @@ geo_database_fingerprint
 
 - `network_statistics_retention` 为 30 到 365 天，默认 90 天。
 - `network_fine_rollup_retention` 为 1 到 7 天，默认 48 小时，且不大于统计保留期。
-- `geoip_country_database` 为空表示关闭 GeoIP；相对路径以服务端配置文件目录为基准。
-- `geoip_reload_interval` 为 10 分钟到 24 小时，默认 1 小时。
-- 旧配置缺少字段时先补默认值再严格校验。
+- `geoip_country_source` 为空表示关闭 GeoIP；本地相对路径以服务端配置文件目录为基准，远程只
+  允许 HTTPS。
+- 旧配置缺少字段时先补默认值再严格校验；已废弃字段按未知字段拒绝。
 
 默认保留关系：
 
@@ -199,8 +199,8 @@ network_history_proxy_dimensions  随最后一个 rollup
 ```
 
 5 分钟和 1 小时 rollup 独立分批清理，每批最多 1000 行且每轮有总批次上限。未成功聚合的终态
-连接不能被连接明细清理删除。SQLite 删除后会由 migrations 重建，客户端、token、代理规则和
-listener 不受影响。
+连接不能被连接明细清理删除。SQLite 删除或被判定损坏后由 migrations 重建；客户端、token、
+代理规则和 listener 不受影响。
 
 ## 6. 管理 API
 

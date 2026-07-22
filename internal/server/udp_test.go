@@ -44,7 +44,7 @@ func TestUDPFlowLimitQueueBoundAndChannelStickiness(t *testing.T) {
 		Conn: channelConn, send: make(chan protocol.UDPFrame, 2),
 		done: make(chan struct{}), manager: manager,
 	}
-	manager.channels["proxy"] = map[string]*UDPChannel{channel.ID: channel}
+	manager.channels[proxyRuntimeKey("client", "proxy")] = map[string]*UDPChannel{channel.ID: channel}
 	t.Cleanup(func() {
 		app.Sessions.mu.Lock()
 		delete(app.Sessions.active, session.ClientID)

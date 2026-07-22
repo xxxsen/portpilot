@@ -24,7 +24,7 @@ func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 	}
 	defer abort()
 	commit()
-	original := manager.handles["proxy"]
+	original := manager.handles[proxyRuntimeKey("client", "proxy")]
 	if original == nil {
 		t.Fatal("listener was not committed")
 	}
@@ -36,7 +36,7 @@ func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 	}
 	defer abort()
 	commit()
-	if manager.handles["proxy"] != original {
+	if manager.handles[proxyRuntimeKey("client", "proxy")] != original {
 		t.Fatal("unchanged bind was unnecessarily re-listened")
 	}
 	if runtime := original.runtime.Load(); runtime == nil || runtime.Data.Connect != "127.0.0.1:18081" {
@@ -53,7 +53,7 @@ func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 	if _, _, err := manager.Prepare(failing); err == nil {
 		t.Fatal("conflicting bind did not fail")
 	}
-	if manager.handles["proxy"] != original || original.closed.Load() {
+	if manager.handles[proxyRuntimeKey("client", "proxy")] != original || original.closed.Load() {
 		t.Fatal("failed prepare changed the active listener")
 	}
 
@@ -65,7 +65,7 @@ func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 	}
 	defer abort()
 	commit()
-	if manager.handles["proxy"] == original || !original.closed.Load() {
+	if manager.handles[proxyRuntimeKey("client", "proxy")] == original || !original.closed.Load() {
 		t.Fatal("changed bind did not replace and close the old listener")
 	}
 
@@ -74,10 +74,42 @@ func TestListenerPrepareReusesReplacesRollsBackAndDeletes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer abort()
-	active := manager.handles["proxy"]
+	active := manager.handles[proxyRuntimeKey("client", "proxy")]
 	commit()
 	if len(manager.handles) != 0 || active == nil || !active.closed.Load() {
 		t.Fatal("deleted proxy listener remained active")
+	}
+}
+
+func TestListenerCompositeKeyAllowsMatchingProxyIDsAcrossClients(t *testing.T) {
+	t.Parallel()
+	app := &App{Config: config.DefaultServerConfig(), Logger: zap.NewNop()}
+	manager := NewListenerManager(app)
+	defer manager.Close()
+
+	proxy := func(bind string) config.ProxyEnvelope {
+		data, err := json.Marshal(config.TunnelData{
+			Network: "tcp", Transport: "auto", Bind: bind, Connect: "127.0.0.1:18080",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return config.ProxyEnvelope{ProxyID: "shared", Kind: "tunnel", Enabled: true, Data: data}
+	}
+	file := config.ClientFile{Revision: 1, ClientConfig: []config.ClientConfig{
+		{ClientID: "client-a", Enabled: true, ProxyList: []config.ProxyEnvelope{proxy(freeListenerAddress(t))}},
+		{ClientID: "client-b", Enabled: true, ProxyList: []config.ProxyEnvelope{proxy(freeListenerAddress(t))}},
+	}}
+	commit, abort, err := manager.Prepare(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer abort()
+	commit()
+	left := manager.handles[proxyRuntimeKey("client-a", "shared")]
+	right := manager.handles[proxyRuntimeKey("client-b", "shared")]
+	if len(manager.handles) != 2 || left == nil || right == nil || left == right {
+		t.Fatalf("composite listener identity was not preserved: %#v", manager.handles)
 	}
 }
 

@@ -58,7 +58,6 @@ func TestServerConfigRejectsInvalidDataPlaneLimits(t *testing.T) {
 	t.Parallel()
 	config := DefaultServerConfig()
 	config.ClientConfigFile = "clients.json"
-	config.DataDB = "events.db"
 	config.Users = []User{{UserName: "admin", PasswordHash: testAdminPasswordHash}}
 	config.DataPlane.SMux.ScaleUpStreams = config.DataPlane.SMux.MaxStreamsPerSession + 1
 	if err := config.Validate(); err == nil {
@@ -66,7 +65,6 @@ func TestServerConfigRejectsInvalidDataPlaneLimits(t *testing.T) {
 	}
 	config = DefaultServerConfig()
 	config.ClientConfigFile = "clients.json"
-	config.DataDB = "events.db"
 	config.Users = []User{{UserName: "admin", PasswordHash: testAdminPasswordHash}}
 	config.DataPlane.UDP.MaxDatagramSize = 65508
 	if err := config.Validate(); err == nil {
