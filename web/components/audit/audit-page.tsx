@@ -1,19 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, RefreshCw, Search, X } from "lucide-react";
+import {ChevronLeft, ChevronRight, Download, RefreshCw, Search, X} from "lucide-react";
 import { api } from "@/lib/api";
 import type { AuditEvent, Page } from "@/lib/types";
-import { Dialog } from "@/components/ui/dialog";
+import {Dialog} from "@/components/ui/dialog";
+import {ExportDialog} from "@/components/export/export-dialog";
 
 const eventTypes = [
-  "admin_login", "admin_logout", "config_update", "client_created", "client_updated",
+  "admin_login", "admin_logout", "data_export", "config_update", "client_created", "client_updated",
   "client_token_rotated", "admin_client_disconnect", "client_session",
   "client_agent_invalid", "database_rebuilt", "system_start", "system_stop",
   "config_metadata_migrated",
 ];
 
-export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
+export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized: () => void}) {
   const [result, setResult] = useState<Page<AuditEvent>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -27,6 +28,7 @@ export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [detail, setDetail] = useState<AuditEvent | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -80,12 +82,12 @@ export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
     <section className="section-block first">
       <div className="section-heading">
         <div><h2>事件与审计</h2><p>管理员操作、配置变更和客户端生命周期</p></div>
-        <button className="icon-button" onClick={() => void load()} title="刷新" aria-label="刷新审计"><RefreshCw size={17} /></button>
+        <div className="heading-actions"><button className="icon-button" onClick={() => setExportOpen(true)} title="导出筛选结果" aria-label="导出审计"><Download size={17} /></button><button className="icon-button" onClick={() => void load()} title="刷新" aria-label="刷新审计"><RefreshCw size={17} /></button></div>
       </div>
       <div className="filter-bar audit-filters">
         <label className="search-control"><Search size={16} /><input aria-label="搜索事件" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索摘要、客户端或原因" maxLength={128} /></label>
         <select aria-label="事件分类" value={category} onChange={(event) => {setCategory(event.target.value); setPage(1);}}>
-          <option value="">全部分类</option><option value="auth">认证</option><option value="config">配置</option><option value="client">客户端</option><option value="security">安全</option><option value="system">系统</option>
+          <option value="">全部分类</option><option value="admin">管理</option><option value="auth">认证</option><option value="config">配置</option><option value="client">客户端</option><option value="security">安全</option><option value="system">系统</option>
         </select>
         <select aria-label="事件类型" value={eventType} onChange={(event) => {setEventType(event.target.value); setPage(1);}}>
           <option value="">全部事件</option>{eventTypes.map((value) => <option key={value}>{value}</option>)}
@@ -118,6 +120,18 @@ export function AuditPage({onUnauthorized}: {onUnauthorized: () => void}) {
         </table>
       </div>
       <Pagination page={page} totalPages={result.total_pages} total={result.total} pageSize={pageSize} setPage={setPage} setPageSize={setPageSize} />
+      <ExportDialog
+        open={exportOpen}
+        onOpenChange={setExportOpen}
+        title="导出事件与审计"
+        dataset="audit_events"
+        endpoint="/api/exports/audit-events"
+        filters={auditExportFilters(query, category, eventType, outcome, dateFrom, dateTo)}
+        filterSummary={[query ? "搜索：" + query : "", category ? "分类：" + category : "", eventType ? "事件：" + eventType : "", outcome ? "结果：" + outcome : "", dateFrom ? "开始：" + dateFrom : "", dateTo ? "结束：" + dateTo : ""].filter(Boolean)}
+        estimatedRows={result.total}
+        csrf={csrf}
+        onUnauthorized={onUnauthorized}
+      />
       <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title={detail?.event_type ?? "事件详情"} description={detail ? `${new Date(detail.occurred_at).toLocaleString()} · ${detail.id}` : undefined} side>
         {detail && <AuditDetail event={detail} />}
       </Dialog>
@@ -196,4 +210,28 @@ function Pagination({page, totalPages, total, pageSize, setPage, setPageSize}: {
       <select aria-label="每页数量" value={pageSize} onChange={(event) => {setPageSize(Number(event.target.value)); setPage(1);}}><option value={25}>25 / 页</option><option value={50}>50 / 页</option><option value={100}>100 / 页</option></select>
     </div>
   );
+}
+
+function auditExportFilters(
+  query: string,
+  category: string,
+  eventType: string,
+  outcome: string,
+  dateFrom: string,
+  dateTo: string,
+) {
+  let effectiveTo = "";
+  if (dateTo) {
+    const end = new Date(dateTo + "T00:00:00");
+    end.setDate(end.getDate() + 1);
+    effectiveTo = end.toISOString();
+  }
+  return {
+    query,
+    category,
+    event_type: eventType,
+    outcome,
+    date_from: dateFrom ? new Date(dateFrom + "T00:00:00").toISOString() : "",
+    date_to: effectiveTo,
+  };
 }

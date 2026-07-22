@@ -239,7 +239,7 @@ describe("NetworkPage", () => {
   });
 
   it("opens on historical insights and keeps connection details inside the page", async () => {
-    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    render(<NetworkPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
 
     expect(await screen.findByRole("heading", {name: "历史指标"})).toBeInTheDocument();
     expect(screen.getAllByText("查看数据表")).toHaveLength(2);
@@ -275,7 +275,7 @@ describe("NetworkPage", () => {
   });
 
   it("keeps the current live rows visible while a refresh is in flight", async () => {
-    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    render(<NetworkPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
     await screen.findByRole("heading", {name: "历史指标"});
     fireEvent.click(screen.getByRole("button", {name: "连接明细"}));
     expect(await screen.findByText("10 秒窗口")).toBeInTheDocument();
@@ -289,7 +289,7 @@ describe("NetworkPage", () => {
   });
 
   it("updates scope and lazily opens an IP drill-down", async () => {
-    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    render(<NetworkPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
     const dimension = await screen.findByRole("row", {name: /Client A.*SSH/});
     fireEvent.click(dimension);
     await waitFor(() => {
@@ -317,7 +317,7 @@ describe("NetworkPage", () => {
   });
 
   it("keeps an explicit all-proxies scope in client view", async () => {
-    render(<NetworkPage onUnauthorized={vi.fn()} />);
+    render(<NetworkPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
     await screen.findByRole("heading", {name: "历史指标"});
     fireEvent.click(screen.getByRole("button", {name: "客户端"}));
     expect(await screen.findByText("选择一个客户端后查看历史洞察")).toBeInTheDocument();

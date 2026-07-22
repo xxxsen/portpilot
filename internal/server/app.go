@@ -13,6 +13,7 @@ import (
 	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/auth"
+	cachelayout "github.com/portpilot/portpilot/internal/cache"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/geoip"
 	"github.com/portpilot/portpilot/internal/store"
@@ -23,6 +24,7 @@ import (
 
 type App struct {
 	Config            config.ServerConfig
+	Cache             *cachelayout.Root
 	ConfigManager     *config.Manager
 	Sessions          *SessionManager
 	Tickets           *auth.TicketStore
@@ -33,6 +35,8 @@ type App struct {
 	Events            *store.Store
 	Activity          *activity.Service
 	GeoIP             *geoip.Resolver
+	ProxyStatus       *ProxyStatusService
+	Attention         *AttentionService
 	Admin             *AdminAuth
 	ControlLimiter    *auth.RateLimiter
 	DataLimiter       *auth.RateLimiter
@@ -45,13 +49,18 @@ type App struct {
 	analytics   analyticsQueryMetrics
 	access      externalAccessMetrics
 
-	analyticsTimeout time.Duration
-	storeError       atomic.Bool
-	ready            atomic.Bool
-	closeOnce        sync.Once
-	agentSnapshots   chan store.ClientAgentSnapshot
-	agentWriterWG    sync.WaitGroup
-	agentWriterClose sync.Once
+	analyticsTimeout  time.Duration
+	storeError        atomic.Bool
+	ready             atomic.Bool
+	closeOnce         sync.Once
+	searchLimiterOnce sync.Once
+	searchLimiter     *searchRateLimiter
+	searchStats       searchQueryMetrics
+	exportOnce        sync.Once
+	exports           *exportManager
+	agentSnapshots    chan store.ClientAgentSnapshot
+	agentWriterWG     sync.WaitGroup
+	agentWriterClose  sync.Once
 }
 
 func New(configPath string, logger *zap.Logger) (*App, error) {
@@ -72,8 +81,19 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load client proxy configuration: %w", err)
 	}
+	cacheRoot, err := cachelayout.Open(cfg.CacheDir)
+	if err != nil {
+		return nil, fmt.Errorf("initialize cache directory: %w", err)
+	}
+	keepCache := false
+	defer func() {
+		if !keepCache {
+			_ = cacheRoot.Close()
+		}
+	}()
+	logger.Info("cache initialized", zap.String("cache_mode", cacheRoot.Mode()))
 	app := &App{
-		Config: cfg, ConfigManager: configManager, Logger: logger,
+		Config: cfg, ConfigManager: configManager, Cache: cacheRoot, Logger: logger,
 		Tickets:           auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
 		Challenges:        auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
 		Admin:             NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
@@ -87,7 +107,7 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	app.UDP = NewUDPManager(app)
 	app.Listeners = NewListenerManager(app)
 
-	eventStore, err := store.Open(cfg.DataDB, logger)
+	eventStore, err := store.Open(cacheRoot.DatabasePath(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("open observability database: %w", err)
 	}
@@ -124,10 +144,12 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 			return nil, fmt.Errorf("audit client metadata migration: %w", err)
 		}
 	}
-	geoResolver, err := geoip.New(
-		cfg.Observability.GeoIPCountryDatabase,
-		cfg.Duration(cfg.Observability.GeoIPReloadInterval),
+	geoResolver, err := geoip.NewManaged(
+		cfg.Observability.GeoIPCountrySource,
+		cacheRoot.GeoIPDatabasePath(),
+		cacheRoot.GeoIPMetadataPath(),
 		logger,
+		geoip.ManagedOptions{},
 	)
 	if err != nil {
 		_ = eventStore.Close()
@@ -151,6 +173,8 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 		return nil, fmt.Errorf("initialize network activity: %w", err)
 	}
 	app.Activity = activityService
+	app.ProxyStatus = NewProxyStatusService(app)
+	app.Attention = NewAttentionService(app)
 	commit, _, err := app.Listeners.Prepare(configManager.Snapshot())
 	if err != nil {
 		activityService.Close()
@@ -191,6 +215,7 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 		IdleTimeout:       0,
 	}
 	app.startAgentWriter()
+	keepCache = true
 	return app, nil
 }
 
@@ -225,6 +250,9 @@ func (a *App) Close(parent context.Context) error {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 		defer cancel()
 		a.Sessions.CloseAll()
+		if a.exports != nil {
+			result = errors.Join(result, a.exports.close(ctx))
+		}
 		a.Listeners.Close()
 		a.UDP.Close()
 		a.Activity.Close()
@@ -238,7 +266,8 @@ func (a *App) Close(parent context.Context) error {
 		})
 		a.closeAgentWriter()
 		storeErr := a.Events.Close()
-		result = errors.Join(adminErr, dataErr, storeErr)
+		cacheErr := a.Cache.Close()
+		result = errors.Join(result, adminErr, dataErr, storeErr, cacheErr)
 	})
 	return result
 }

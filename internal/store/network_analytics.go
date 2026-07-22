@@ -1306,6 +1306,10 @@ func normalizeAnalyticsQuery(query AnalyticsQuery) (AnalyticsQuery, error) {
 	return query, nil
 }
 
+func NormalizeAnalyticsQuery(query AnalyticsQuery) (AnalyticsQuery, error) {
+	return normalizeAnalyticsQuery(query)
+}
+
 func analyticsDimensionSearch(where string, arguments []any, search string) (string, []any) {
 	search = strings.TrimSpace(search)
 	if search == "" {

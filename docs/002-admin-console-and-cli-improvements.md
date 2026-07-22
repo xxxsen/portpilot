@@ -5,7 +5,9 @@
 本文记录 PortPilot 已实现的管理后台、审计、连接活动、SQLite migration 和命令行契约。
 底层控制协议、smux、UDP-over-TCP、listener 与 session 生命周期见
 [`001-portpilot-design.md`](001-portpilot-design.md)，终态聚合、Top K、GeoIP 和历史洞察
-交互见 [`003-network-history-analytics.md`](003-network-history-analytics.md)。
+交互见 [`003-network-history-analytics.md`](003-network-history-analytics.md)。运行状态、全局搜索、
+周期对比、导出和 cache 生命周期见
+[`004-operational-insights-and-navigation.md`](004-operational-insights-and-navigation.md)。
 
 稳定边界如下：
 

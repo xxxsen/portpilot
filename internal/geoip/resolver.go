@@ -31,12 +31,27 @@ type Result struct {
 
 type Status struct {
 	Status              string `json:"status"`
+	SourceType          string `json:"source_type"`
 	DatabaseFingerprint string `json:"database_fingerprint"`
 	LastReloadAt        int64  `json:"last_reload_at"`
+	LastCheckedAt       int64  `json:"last_checked_at"`
+	LastDownloadedAt    int64  `json:"last_downloaded_at"`
+	NextCheckAt         int64  `json:"next_check_at"`
+	Stale               bool   `json:"stale"`
+	UpdateState         string `json:"update_state"`
+	LastErrorCode       string `json:"last_error_code"`
 	LastError           string `json:"-"`
 }
 
 type Metrics struct {
+	Check          uint64 `json:"check"`
+	NotModified    uint64 `json:"not_modified"`
+	Download       uint64 `json:"download"`
+	DownloadBytes  uint64 `json:"download_bytes"`
+	FormatRejected uint64 `json:"format_rejected"`
+	ValidationFail uint64 `json:"validation_failure"`
+	InstallSuccess uint64 `json:"install_success"`
+	Retry          uint64 `json:"retry"`
 	LookupCountry  uint64 `json:"lookup_country"`
 	LookupPrivate  uint64 `json:"lookup_private"`
 	LookupReserved uint64 `json:"lookup_reserved"`
@@ -61,7 +76,9 @@ type readerState struct {
 }
 
 type Resolver struct {
+	updater        *updater
 	path           string
+	sourceType     SourceType
 	reloadInterval time.Duration
 	logger         *zap.Logger
 
@@ -72,18 +89,31 @@ type Resolver struct {
 	cacheOrder    *list.List
 	cacheCapacity int
 
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
-	lastReloadAt   atomic.Int64
-	lastError      atomic.Pointer[string]
-	lookupCountry  atomic.Uint64
-	lookupPrivate  atomic.Uint64
-	lookupReserved atomic.Uint64
-	lookupUnknown  atomic.Uint64
-	lookupInvalid  atomic.Uint64
-	reloadSuccess  atomic.Uint64
-	reloadFailure  atomic.Uint64
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	lastReloadAt      atomic.Int64
+	lastCheckedAt     atomic.Int64
+	lastDownloadedAt  atomic.Int64
+	nextCheckAt       atomic.Int64
+	updateState       atomic.Pointer[string]
+	lastErrorCode     atomic.Pointer[string]
+	lastError         atomic.Pointer[string]
+	checkCount        atomic.Uint64
+	notModified       atomic.Uint64
+	downloadCount     atomic.Uint64
+	downloadBytes     atomic.Uint64
+	formatRejected    atomic.Uint64
+	validationFailure atomic.Uint64
+	installSuccess    atomic.Uint64
+	retryCount        atomic.Uint64
+	lookupCountry     atomic.Uint64
+	lookupPrivate     atomic.Uint64
+	lookupReserved    atomic.Uint64
+	lookupUnknown     atomic.Uint64
+	lookupInvalid     atomic.Uint64
+	reloadSuccess     atomic.Uint64
+	reloadFailure     atomic.Uint64
 }
 
 func New(path string, reloadInterval time.Duration, logger *zap.Logger) (*Resolver, error) {
@@ -98,10 +128,14 @@ func New(path string, reloadInterval time.Duration, logger *zap.Logger) (*Resolv
 		path: path, reloadInterval: reloadInterval, logger: logger,
 		cache: make(map[string]*list.Element), cacheOrder: list.New(),
 		cacheCapacity: defaultCacheCapacity, ctx: ctx, cancel: cancel,
+		sourceType: SourceDisabled,
 	}
 	if path == "" {
+		resolver.setUpdateState("idle")
 		return resolver, nil
 	}
+	resolver.sourceType = SourceLocal
+	resolver.setUpdateState("idle")
 	if err := resolver.reload(true); err != nil {
 		cancel()
 		return nil, err
@@ -161,25 +195,37 @@ func (r *Resolver) Resolve(ip netip.Addr) Result {
 }
 
 func (r *Resolver) Status() Status {
-	if r == nil || r.path == "" {
-		return Status{Status: "disabled"}
+	if r == nil {
+		return Status{Status: "disabled", SourceType: string(SourceDisabled), UpdateState: "idle"}
 	}
 	state := r.reader.Load()
 	fingerprint := ""
-	ready := state != nil
 	if state != nil {
 		fingerprint = state.fingerprint
 	}
 	status := "ready"
-	if !ready || r.lastError.Load() != nil {
+	if r.sourceType == SourceDisabled {
+		status = "disabled"
+	} else if state == nil || r.lastError.Load() != nil {
+		status = "degraded"
+	}
+	checkedAt := r.lastCheckedAt.Load()
+	stale := r.sourceType == SourceRemote && checkedAt > 0 &&
+		time.Since(time.UnixMilli(checkedAt)) > 8*24*time.Hour
+	if stale {
 		status = "degraded"
 	}
 	result := Status{
-		Status: status, DatabaseFingerprint: fingerprint,
-		LastReloadAt: r.lastReloadAt.Load(),
+		Status: status, SourceType: string(r.sourceType), DatabaseFingerprint: fingerprint,
+		LastReloadAt: r.lastReloadAt.Load(), LastCheckedAt: checkedAt,
+		LastDownloadedAt: r.lastDownloadedAt.Load(), NextCheckAt: r.nextCheckAt.Load(),
+		Stale: stale, UpdateState: r.currentUpdateState(),
 	}
 	if message := r.lastError.Load(); message != nil {
 		result.LastError = *message
+	}
+	if code := r.lastErrorCode.Load(); code != nil {
+		result.LastErrorCode = *code
 	}
 	return result
 }
@@ -251,6 +297,7 @@ func (r *Resolver) reload(required bool) error {
 	}
 	r.lastReloadAt.Store(time.Now().UTC().UnixMilli())
 	r.lastError.Store(nil)
+	r.lastErrorCode.Store(nil)
 	r.reloadSuccess.Add(1)
 	if !required {
 		r.logger.Info(
@@ -296,8 +343,24 @@ func (s *readerState) closeIfRetired() {
 }
 
 func (r *Resolver) setError(err error) {
+	r.setErrorCode("geoip_error", err)
+}
+
+func (r *Resolver) setErrorCode(code string, err error) {
 	message := err.Error()
 	r.lastError.Store(&message)
+	r.lastErrorCode.Store(&code)
+}
+
+func (r *Resolver) setUpdateState(value string) {
+	r.updateState.Store(&value)
+}
+
+func (r *Resolver) currentUpdateState() string {
+	if value := r.updateState.Load(); value != nil {
+		return *value
+	}
+	return "idle"
 }
 
 func (r *Resolver) recordLookup(kind string) {
@@ -320,6 +383,10 @@ func (r *Resolver) Metrics() Metrics {
 		return Metrics{}
 	}
 	return Metrics{
+		Check: r.checkCount.Load(), NotModified: r.notModified.Load(),
+		Download: r.downloadCount.Load(), DownloadBytes: r.downloadBytes.Load(),
+		FormatRejected: r.formatRejected.Load(), ValidationFail: r.validationFailure.Load(),
+		InstallSuccess: r.installSuccess.Load(), Retry: r.retryCount.Load(),
 		LookupCountry:  r.lookupCountry.Load(),
 		LookupPrivate:  r.lookupPrivate.Load(),
 		LookupReserved: r.lookupReserved.Load(),

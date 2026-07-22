@@ -20,10 +20,11 @@ func TestEmbeddedMigrationsAreNamedAndDDLOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 3 ||
+	if len(entries) != 4 ||
 		entries[0].Name() != "0001_init.sql" ||
 		entries[1].Name() != "0002_network_history_analytics.sql" ||
-		entries[2].Name() != "0003_external_access_rate_limit_proxy_protocol_client_agent.sql" {
+		entries[2].Name() != "0003_external_access_rate_limit_proxy_protocol_client_agent.sql" ||
+		entries[3].Name() != "0004_operational_insights.sql" {
 		t.Fatalf("unexpected migration files: %#v", entries)
 	}
 	dml := regexp.MustCompile(`(?im)^\s*(insert|update|delete|replace|merge|select)\b`)
@@ -81,7 +82,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 		"0001_init.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE alpha (id TEXT PRIMARY KEY);`)},
 		"0002_add_beta.sql": &fstest.MapFile{Data: second},
 	})
-	if store, err := Open(path, zap.NewNop()); !errors.Is(err, errMigrationChanged) || store != nil {
+	if store, err := openOnce(path, zap.NewNop()); !errors.Is(err, errMigrationChanged) || store != nil {
 		t.Fatalf("changed migration error=%v store=%v", err, store)
 	}
 
@@ -99,7 +100,7 @@ func TestMigrationUpgradeChecksumDriftAndRollback(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if store, err := Open(path, zap.NewNop()); !errors.Is(err, errSchemaDrift) || store != nil {
+	if store, err := openOnce(path, zap.NewNop()); !errors.Is(err, errSchemaDrift) || store != nil {
 		t.Fatalf("schema drift error=%v store=%v", err, store)
 	}
 
@@ -167,8 +168,8 @@ func TestNetworkAnalyticsMigrationUpgradesExistingDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
-		t.Fatalf("schema version=%d, want 3", version)
+	if version != 4 {
+		t.Fatalf("schema version=%d, want 4", version)
 	}
 	var externalIP string
 	var aggregatedAt sql.NullInt64
@@ -252,33 +253,30 @@ func TestLegacyDatabaseIsBackedUpAndRebuilt(t *testing.T) {
 	if legacyTable != 0 {
 		t.Fatal("legacy events table survived disposable database rebuild")
 	}
-	entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(filepath.Join(dir, "quarantine"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	foundBackup := false
-	backupPath := ""
+	quarantinePath := ""
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "portpilot.db.legacy-") &&
-			strings.HasSuffix(entry.Name(), ".bak") {
-			foundBackup = true
-			backupPath = filepath.Join(dir, entry.Name())
+		if strings.HasPrefix(entry.Name(), "portpilot-") && strings.HasSuffix(entry.Name(), ".db") {
+			quarantinePath = filepath.Join(dir, "quarantine", entry.Name())
 		}
 	}
-	if !foundBackup {
-		t.Fatal("legacy database backup was not created")
+	if quarantinePath == "" {
+		t.Fatal("legacy database was not quarantined")
 	}
-	backup, err := sql.Open("sqlite", backupPath)
+	quarantined, err := sql.Open("sqlite", quarantinePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = backup.Close() }()
+	defer func() { _ = quarantined.Close() }()
 	var legacyRows int
-	if err := backup.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM events`).Scan(&legacyRows); err != nil {
-		t.Fatalf("legacy backup is not a readable consistent database: %v", err)
+	if err := quarantined.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM events`).Scan(&legacyRows); err != nil {
+		t.Fatalf("quarantined legacy database is not readable: %v", err)
 	}
 	if legacyRows != 1 {
-		t.Fatalf("legacy backup rows=%d, want 1", legacyRows)
+		t.Fatalf("quarantined legacy rows=%d, want 1", legacyRows)
 	}
 }
 

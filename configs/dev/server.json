@@ -13,7 +13,7 @@
     }
   ],
   "client_config_file": "./clients.json",
-  "data_db": "../../.dev-data/portpilot.db",
+  "cache_dir": "../../.dev-data/cache",
   "log_config": {
     "level": "debug",
     "console": true
@@ -67,8 +67,7 @@
     "network_sample_retention": "168h",
     "network_statistics_retention": "2160h",
     "network_fine_rollup_retention": "48h",
-    "geoip_country_database": "",
-    "geoip_reload_interval": "1h",
+    "geoip_country_source": "",
     "sample_interval": "10s",
     "cleanup_interval": "1h",
     "max_active_connections": 100000

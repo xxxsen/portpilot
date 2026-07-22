@@ -157,8 +157,9 @@ test("authentication lifecycle and secret redaction", async ({page, context}) =>
   expect(consoleErrors.filter((message) => !message.includes("status of 401"))).toEqual([]);
 });
 
-test("live status and audit views expose the formal server state", async ({page}) => {
+test("live status and audit views expose the formal server state", async ({page}, testInfo) => {
   await login(page);
+  await expect(page.getByRole("heading", {name: "需要处理"})).toBeVisible();
   await expect(page.getByText("dev-client", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("ACTIVE", {exact: true}).first()).toBeVisible();
   await expect(page.getByText("UDP 通道", {exact: true})).toBeVisible();
@@ -187,11 +188,22 @@ test("live status and audit views expose the formal server state", async ({page}
   await expect(clientDetail.getByRole("heading", {name: "控制会话"})).toBeVisible();
   await clientDetail.getByRole("button", {name: "关闭"}).click();
 
+  await page.keyboard.press("ControlOrMeta+K");
+  const globalSearch = page.getByRole("dialog", {name: "全局搜索"});
+  await expect(globalSearch).toBeVisible();
+  await globalSearch.getByRole("textbox", {name: "全局搜索"}).fill("dev-client");
+  await expect(globalSearch.getByRole("button").filter({hasText: "dev-client"}).first()).toBeVisible();
+  await globalSearch.getByRole("textbox", {name: "全局搜索"}).press("Enter");
+  await expect(page.getByRole("dialog", {name: "本地开发客户端"})).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("client_id")).toBe("dev-client");
+  await page.getByRole("dialog", {name: "本地开发客户端"}).getByRole("button", {name: "关闭"}).click();
+
   await navigate(page, "网络活动");
   await expect(page.getByRole("heading", {name: "网络活动"})).toBeVisible();
   await expect(page.getByRole("button", {name: "历史洞察", exact: true})).toHaveClass(/selected/);
   await expect(page.getByRole("button", {name: "24h"})).toHaveClass(/selected/);
   await expect(page.getByRole("heading", {name: "历史指标"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "变化提示"})).toBeVisible();
   await expectYAxisLabelsInsideChart(page);
   const chartBeforeRefresh = await page.locator(".insight-chart").first().boundingBox();
   const refreshResponse = page.waitForResponse((response) =>
@@ -226,9 +238,18 @@ test("live status and audit views expose the formal server state", async ({page}
     connectionRanking.findIndex((row) => row.includes("127.0.0.3")),
   );
   await connectionTarget.click();
-  const trafficRankingTab = page.getByRole("button", {name: "按流量", exact: true});
-  if (await trafficRankingTab.isVisible()) await trafficRankingTab.click();
   await expect(trafficTarget).toBeVisible();
+  const connectionRankingBox = await page.locator(".ranking-connections").boundingBox();
+  const trafficRankingBox = await page.locator(".ranking-traffic").boundingBox();
+  expect(connectionRankingBox).not.toBeNull();
+  expect(trafficRankingBox).not.toBeNull();
+  expect(trafficRankingBox!.y).toBeGreaterThanOrEqual(connectionRankingBox!.y + connectionRankingBox!.height - 1);
+  if (testInfo.project.name !== "mobile") {
+    const rankingOverflow = await page.locator(".ranking-table .table-wrap").evaluateAll((elements) =>
+      elements.map((element) => element.scrollWidth > element.clientWidth + 1)
+    );
+    expect(rankingOverflow).toEqual([false, false]);
+  }
   await expect(trafficRows.filter({hasText: "127.0.0.2"})).toBeVisible();
   const trafficRanking = await trafficRows.allTextContents();
   expect(trafficRanking.findIndex((row) => row.includes("127.0.0.3"))).toBeLessThan(
@@ -259,6 +280,22 @@ test("live status and audit views expose the formal server state", async ({page}
   await page.getByRole("button", {name: "历史连接"}).click();
   await expect(page.getByRole("heading", {name: "历史连接"})).toBeVisible();
   await expect(page.getByRole("heading", {name: "实时连接"})).toHaveCount(0);
+  const exportResponse = page.waitForResponse((response) =>
+    response.url().includes("/api/exports/network-connections") && response.request().method() === "POST"
+  );
+  await page.getByRole("button", {name: "导出连接"}).click();
+  const exportDialog = page.getByRole("dialog", {name: "导出连接明细"});
+  await expect(exportDialog).toContainText("最多 10,000 行");
+  const download = page.waitForEvent("download");
+  await exportDialog.getByRole("button", {name: "下载 ZIP"}).click();
+  const response = await exportResponse;
+  expect(response.ok()).toBeTruthy();
+  expect(response.headers()["content-type"]).toBe("application/zip");
+  expect(response.headers()["content-disposition"]).toContain("attachment;");
+  expect(response.headers()["content-disposition"]).toContain(".zip");
+  const downloaded = await download;
+  expect(downloaded.suggestedFilename()).toMatch(/^portpilot-network_connections-.*\.zip$/);
+  await expect(exportDialog).toBeHidden();
   const networkResponse = await page.request.get("/backend/api/network/connections?scope=history&page=1&page_size=25");
   expect(networkResponse.ok()).toBeTruthy();
   const network = await networkResponse.json() as {
@@ -317,9 +354,12 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await editor.getByRole("button", {name: "保存配置"}).click();
     await expect(editor).toBeHidden();
     const securedRow = page.getByRole("row").filter({hasText: proxyIds[0]});
-    await expect(securedRow).toContainText("允许 1");
-    await expect(securedRow).toContainText("v1");
-    await expect(securedRow).toContainText("64 KiB/s");
+    await securedRow.click();
+    const runtimeDrawer = page.getByRole("dialog").filter({hasText: proxyIds[0]});
+    await expect(runtimeDrawer).toContainText("127.0.0.0/8");
+    await expect(runtimeDrawer).toContainText("v1 已启用");
+    await expect(runtimeDrawer).toContainText("64 KiB/s");
+    await runtimeDrawer.getByRole("button", {name: "关闭"}).click();
     await createProxy(page, proxyIds[1], "tcp", "direct", "127.0.0.1:7101", "127.0.0.1:18080");
     await createProxy(page, proxyIds[2], "udp", "smux-datagram", "127.0.0.1:7102", "127.0.0.1:18081");
 

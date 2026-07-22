@@ -59,7 +59,7 @@ func TestEndToEndTCPDirectUDPAndReconnect(t *testing.T) {
 	serverConfig.ServerAddr = dataAddress
 	serverConfig.Users = []config.User{{UserName: "admin", PasswordHash: adminHash}}
 	serverConfig.ClientConfigFile = clientsPath
-	serverConfig.DataDB = filepath.Join(dir, "events.db")
+	serverConfig.CacheDir = filepath.Join(dir, "cache")
 	serverConfig.DataPlane.SMux.MinSessions = 1
 	serverConfig.DataPlane.SMux.MaxSessions = 2
 	serverConfig.DataPlane.SMux.ScaleUpStreams = 2

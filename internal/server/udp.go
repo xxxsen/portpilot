@@ -116,7 +116,7 @@ func (m *UDPManager) reserveChannel(session *Session, proxyID, connect, channelI
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	count := 0
-	for _, channel := range m.channels[proxyID] {
+	for _, channel := range m.channels[proxyRuntimeKey(session.ClientID, proxyID)] {
 		if channel.Epoch == session.Epoch && channel.SessionID == session.ID && channel.Connect == connect && !channel.closed.Load() {
 			count++
 		}
@@ -195,14 +195,14 @@ func (m *UDPManager) Pair(ctx context.Context, open protocol.StreamOpen, conn ne
 	}
 	delete(m.pending, open.ChannelID)
 	channel.Connect = pending.Connect
-	if m.channels[open.ProxyID] == nil {
-		m.channels[open.ProxyID] = make(map[string]*UDPChannel)
+	if m.channels[proxyRuntimeKey(open.ClientID, open.ProxyID)] == nil {
+		m.channels[proxyRuntimeKey(open.ClientID, open.ProxyID)] = make(map[string]*UDPChannel)
 	}
-	if _, exists := m.channels[open.ProxyID][open.ChannelID]; exists {
+	if _, exists := m.channels[proxyRuntimeKey(open.ClientID, open.ProxyID)][open.ChannelID]; exists {
 		m.mu.Unlock()
 		return nil, false
 	}
-	m.channels[open.ProxyID][open.ChannelID] = channel
+	m.channels[proxyRuntimeKey(open.ClientID, open.ProxyID)][open.ChannelID] = channel
 	m.mu.Unlock()
 	return channel, true
 }
@@ -227,7 +227,7 @@ func (m *UDPManager) RunChannel(channel *UDPChannel) {
 		case protocol.UDPTypeDataToServer:
 			m.writeResponse(channel, frame)
 		case protocol.UDPTypeFlowClose:
-			m.removeFlow(channel.ProxyID, channel.Epoch, frame.FlowID, "client_flow_close")
+			m.removeFlow(channel.ClientID, channel.ProxyID, channel.Epoch, frame.FlowID, "client_flow_close")
 		default:
 			return
 		}
@@ -294,7 +294,7 @@ func (m *UDPManager) findOrCreateFlowLocked(
 	if flow := m.bySource[sourceKey]; flow != nil {
 		return flow, false
 	}
-	if m.flowCountLocked(runtime.Proxy.ProxyID, session.Epoch) >= m.app.Config.DataPlane.UDP.MaxFlowsPerProxy ||
+	if m.flowCountLocked(runtime.ClientID, runtime.Proxy.ProxyID, session.Epoch) >= m.app.Config.DataPlane.UDP.MaxFlowsPerProxy ||
 		len(m.byID) >= m.app.Config.Limits.MaxUDPFlowsTotal {
 		return nil, false
 	}
@@ -309,7 +309,7 @@ func (m *UDPManager) findOrCreateFlowLocked(
 		),
 	}
 	m.bySource[sourceKey] = flow
-	m.byID[flowIDKey(flow.ProxyID, flow.Epoch, flow.ID)] = flow
+	m.byID[flowIDKey(flow.ClientID, flow.ProxyID, flow.Epoch, flow.ID)] = flow
 	return flow, true
 }
 
@@ -319,13 +319,13 @@ func (m *UDPManager) channelForFlowLocked(
 	session *Session,
 	sourceKey string,
 ) *UDPChannel {
-	channel := m.channels[flow.ProxyID][flow.ChannelID]
+	channel := m.channels[proxyRuntimeKey(flow.ClientID, flow.ProxyID)][flow.ChannelID]
 	if channel != nil && !channel.closed.Load() && channel.ClientID == runtime.ClientID &&
 		channel.SessionID == session.ID && channel.Epoch == session.Epoch && channel.Connect == flow.Connect {
 		return channel
 	}
-	available := make([]*UDPChannel, 0, len(m.channels[flow.ProxyID]))
-	for _, candidate := range m.channels[flow.ProxyID] {
+	available := make([]*UDPChannel, 0, len(m.channels[proxyRuntimeKey(flow.ClientID, flow.ProxyID)]))
+	for _, candidate := range m.channels[proxyRuntimeKey(flow.ClientID, flow.ProxyID)] {
 		if candidate.ClientID == runtime.ClientID && candidate.SessionID == session.ID &&
 			candidate.Epoch == session.Epoch && candidate.Connect == flow.Connect && !candidate.closed.Load() {
 			available = append(available, candidate)
@@ -371,7 +371,7 @@ func (m *UDPManager) removeNewFlowLocked(flow *udpFlow, sourceKey string, create
 		return
 	}
 	delete(m.bySource, sourceKey)
-	delete(m.byID, flowIDKey(flow.ProxyID, flow.Epoch, flow.ID))
+	delete(m.byID, flowIDKey(flow.ClientID, flow.ProxyID, flow.Epoch, flow.ID))
 }
 
 func (c *UDPChannel) writeLoop() {
@@ -394,7 +394,7 @@ func (c *UDPChannel) writeLoop() {
 
 func (m *UDPManager) writeResponse(channel *UDPChannel, frame protocol.UDPFrame) {
 	m.mu.RLock()
-	flow := m.byID[flowIDKey(channel.ProxyID, channel.Epoch, frame.FlowID)]
+	flow := m.byID[flowIDKey(channel.ClientID, channel.ProxyID, channel.Epoch, frame.FlowID)]
 	m.mu.RUnlock()
 	if flow == nil || flow.Listener == nil {
 		return
@@ -425,7 +425,7 @@ func (m *UDPManager) reconcileFlows() {
 	runtimes := make(map[string]ProxyRuntime)
 	for _, runtime := range m.app.Listeners.Snapshot() {
 		if runtime.Data.Network == "udp" {
-			runtimes[runtime.Proxy.ProxyID] = runtime
+			runtimes[proxyRuntimeKey(runtime.ClientID, runtime.Proxy.ProxyID)] = runtime
 		}
 	}
 	maxDatagram := m.app.Config.DataPlane.UDP.MaxDatagramSize
@@ -436,7 +436,7 @@ func (m *UDPManager) reconcileFlows() {
 	var removed []removedFlow
 	m.mu.Lock()
 	for key, flow := range m.byID {
-		runtime, ok := runtimes[flow.ProxyID]
+		runtime, ok := runtimes[proxyRuntimeKey(flow.ClientID, flow.ProxyID)]
 		allowed := ok
 		if allowed {
 			allowed, _ = m.app.allowExternal(runtime, flow.Source)
@@ -447,7 +447,7 @@ func (m *UDPManager) reconcileFlows() {
 				flow.ClientID, flow.ProxyID, flow.Epoch, flow.Source.String(),
 			))
 			removed = append(removed, removedFlow{
-				flow: flow, channel: m.channels[flow.ProxyID][flow.ChannelID],
+				flow: flow, channel: m.channels[proxyRuntimeKey(flow.ClientID, flow.ProxyID)][flow.ChannelID],
 			})
 			continue
 		}
@@ -485,15 +485,15 @@ func (m *UDPManager) cleanupStaleChannels() {
 	desiredClient := make(map[string]string)
 	for _, runtime := range m.app.Listeners.Snapshot() {
 		if runtime.Data.Network == "udp" {
-			desiredConnect[runtime.Proxy.ProxyID] = runtime.Data.Connect
-			desiredClient[runtime.Proxy.ProxyID] = runtime.ClientID
+			desiredConnect[proxyRuntimeKey(runtime.ClientID, runtime.Proxy.ProxyID)] = runtime.Data.Connect
+			desiredClient[proxyRuntimeKey(runtime.ClientID, runtime.Proxy.ProxyID)] = runtime.ClientID
 		}
 	}
 	m.mu.Lock()
 	stale := make([]*UDPChannel, 0)
-	for proxyID, channels := range m.channels {
+	for proxyKey, channels := range m.channels {
 		for _, channel := range channels {
-			if desiredConnect[proxyID] == channel.Connect && desiredClient[proxyID] == channel.ClientID {
+			if desiredConnect[proxyKey] == channel.Connect && desiredClient[proxyKey] == channel.ClientID {
 				continue
 			}
 			inUse := false
@@ -516,8 +516,8 @@ func (m *UDPManager) cleanupStaleChannels() {
 
 func (m *UDPManager) removeChannel(channel *UDPChannel) {
 	m.mu.Lock()
-	if current := m.channels[channel.ProxyID][channel.ID]; current == channel {
-		delete(m.channels[channel.ProxyID], channel.ID)
+	if current := m.channels[proxyRuntimeKey(channel.ClientID, channel.ProxyID)][channel.ID]; current == channel {
+		delete(m.channels[proxyRuntimeKey(channel.ClientID, channel.ProxyID)], channel.ID)
 	}
 	m.mu.Unlock()
 	session := m.app.Sessions.Current(channel.ClientID)
@@ -526,8 +526,8 @@ func (m *UDPManager) removeChannel(channel *UDPChannel) {
 	}
 }
 
-func (m *UDPManager) removeFlow(proxyID string, epoch, id uint64, reason string) {
-	key := flowIDKey(proxyID, epoch, id)
+func (m *UDPManager) removeFlow(clientID, proxyID string, epoch, id uint64, reason string) {
+	key := flowIDKey(clientID, proxyID, epoch, id)
 	m.mu.Lock()
 	flow := m.byID[key]
 	if flow != nil {
@@ -540,10 +540,10 @@ func (m *UDPManager) removeFlow(proxyID string, epoch, id uint64, reason string)
 	}
 }
 
-func (m *UDPManager) flowCountLocked(proxyID string, epoch uint64) int {
+func (m *UDPManager) flowCountLocked(clientID, proxyID string, epoch uint64) int {
 	count := 0
 	for _, flow := range m.byID {
-		if flow.ProxyID == proxyID && flow.Epoch == epoch {
+		if flow.ClientID == clientID && flow.ProxyID == proxyID && flow.Epoch == epoch {
 			count++
 		}
 	}
@@ -573,7 +573,7 @@ func (m *UDPManager) reaper() {
 			m.mu.Unlock()
 			for _, flow := range expired {
 				m.mu.RLock()
-				channel := m.channels[flow.ProxyID][flow.ChannelID]
+				channel := m.channels[proxyRuntimeKey(flow.ClientID, flow.ProxyID)][flow.ChannelID]
 				m.mu.RUnlock()
 				if channel != nil && !channel.closed.Load() {
 					select {
@@ -674,8 +674,8 @@ func sourceFlowKey(clientID, proxyID string, epoch uint64, source string) string
 	return fmt.Sprintf("%s/%d/%s/%s", clientID, epoch, proxyID, source)
 }
 
-func flowIDKey(proxyID string, epoch, id uint64) string {
-	return fmt.Sprintf("%s/%d/%d", proxyID, epoch, id)
+func flowIDKey(clientID, proxyID string, epoch, id uint64) string {
+	return fmt.Sprintf("%s/%s/%d/%d", clientID, proxyID, epoch, id)
 }
 
 func cloneUDPAddr(address *net.UDPAddr) *net.UDPAddr {

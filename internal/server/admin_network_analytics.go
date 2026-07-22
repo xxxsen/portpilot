@@ -37,6 +37,7 @@ type analyticsQueryMetrics struct {
 	dimensions analyticsQueryCounter
 	topIPs     analyticsQueryCounter
 	ipSeries   analyticsQueryCounter
+	comparison analyticsQueryCounter
 }
 
 type analyticsQueryCounterSnapshot struct {
@@ -50,6 +51,7 @@ type analyticsQueryMetricsSnapshot struct {
 	Dimensions analyticsQueryCounterSnapshot `json:"dimensions"`
 	TopIPs     analyticsQueryCounterSnapshot `json:"top_ips"`
 	IPSeries   analyticsQueryCounterSnapshot `json:"ip_series"`
+	Comparison analyticsQueryCounterSnapshot `json:"comparison"`
 }
 
 type analyticsRange struct {
@@ -301,7 +303,7 @@ func (m *analyticsQueryMetrics) snapshot() analyticsQueryMetricsSnapshot {
 		Overview:   m.overview.snapshot(),
 		Dimensions: m.dimensions.snapshot(),
 		TopIPs:     m.topIPs.snapshot(),
-		IPSeries:   m.ipSeries.snapshot(),
+		IPSeries:   m.ipSeries.snapshot(), Comparison: m.comparison.snapshot(),
 	}
 }
 

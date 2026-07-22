@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,7 +30,7 @@ type ServerConfig struct {
 	RealIPHeader     string                 `json:"real_ip_header"`
 	Users            []User                 `json:"users"`
 	ClientConfigFile string                 `json:"client_config_file"`
-	DataDB           string                 `json:"data_db"`
+	CacheDir         string                 `json:"cache_dir"`
 	AccessPolicy     AccessPolicyConfig     `json:"access_policy"`
 	DataPlane        DataPlaneConfig        `json:"data_plane"`
 	Timeouts         TimeoutConfig          `json:"timeouts"`
@@ -99,8 +100,7 @@ type ObservabilityConfig struct {
 	NetworkSampleRetention     string `json:"network_sample_retention"`
 	NetworkStatisticsRetention string `json:"network_statistics_retention"`
 	NetworkFineRollupRetention string `json:"network_fine_rollup_retention"`
-	GeoIPCountryDatabase       string `json:"geoip_country_database"`
-	GeoIPReloadInterval        string `json:"geoip_reload_interval"`
+	GeoIPCountrySource         string `json:"geoip_country_source"`
 	SampleInterval             string `json:"sample_interval"`
 	CleanupInterval            string `json:"cleanup_interval"`
 	MaxActiveConnections       int    `json:"max_active_connections"`
@@ -195,8 +195,8 @@ func DefaultServerConfig() ServerConfig {
 		Observability: ObservabilityConfig{
 			AuditRetention: "4320h", NetworkRetention: "720h",
 			NetworkSampleRetention: "168h", NetworkStatisticsRetention: "2160h",
-			NetworkFineRollupRetention: "48h", GeoIPReloadInterval: "1h",
-			SampleInterval: "10s", CleanupInterval: "1h", MaxActiveConnections: 100000,
+			NetworkFineRollupRetention: "48h",
+			SampleInterval:             "10s", CleanupInterval: "1h", MaxActiveConnections: 100000,
 		},
 	}
 }
@@ -208,14 +208,17 @@ func LoadServer(path string) (ServerConfig, error) {
 	}
 	base := filepath.Dir(path)
 	cfg.ClientConfigFile = resolvePath(base, cfg.ClientConfigFile)
-	cfg.DataDB = resolvePath(base, cfg.DataDB)
+	if cfg.CacheDir != "" {
+		cfg.CacheDir = resolvePath(base, cfg.CacheDir)
+	}
 	cfg.RealIPHeader = textproto.CanonicalMIMEHeaderKey(cfg.RealIPHeader)
 	cfg.LogConfig = normalizeLogConfig(base, cfg.LogConfig)
-	if cfg.Observability.GeoIPCountryDatabase != "" {
-		cfg.Observability.GeoIPCountryDatabase = resolvePath(
-			base,
-			cfg.Observability.GeoIPCountryDatabase,
-		)
+	if source := strings.TrimSpace(cfg.Observability.GeoIPCountrySource); source != "" {
+		parsed, parseErr := url.Parse(source)
+		if parseErr == nil && parsed.Scheme == "" {
+			source = resolvePath(base, source)
+		}
+		cfg.Observability.GeoIPCountrySource = source
 	}
 	if err := cfg.Validate(); err != nil {
 		return ServerConfig{}, fmt.Errorf("validate server config: %w", err)
@@ -272,8 +275,8 @@ func (c ServerConfig) Validate() error {
 	if samePort(c.AdminAddr, c.ServerAddr) {
 		return errors.New("admin_addr and server_addr ports must differ")
 	}
-	if c.ClientConfigFile == "" || c.DataDB == "" {
-		return errors.New("client_config_file and data_db are required")
+	if c.ClientConfigFile == "" {
+		return errors.New("client_config_file is required")
 	}
 	if err := validateUsers(c.Users); err != nil {
 		return err
@@ -467,9 +470,8 @@ func validateObservabilityRetention(value ObservabilityConfig) error {
 }
 
 func validateObservabilityRuntime(value ObservabilityConfig) error {
-	geoIPReload, err := positiveDuration(value.GeoIPReloadInterval)
-	if err != nil || geoIPReload < 10*time.Minute || geoIPReload > 24*time.Hour {
-		return errors.New("geoip_reload_interval must be between 10m and 24h")
+	if err := validateGeoIPSource(value.GeoIPCountrySource); err != nil {
+		return err
 	}
 	sampleInterval, err := positiveDuration(value.SampleInterval)
 	if err != nil || sampleInterval < 5*time.Second || sampleInterval > time.Minute {
@@ -481,6 +483,26 @@ func validateObservabilityRuntime(value ObservabilityConfig) error {
 	}
 	if value.MaxActiveConnections < 1000 || value.MaxActiveConnections > 1000000 {
 		return errors.New("max_active_connections must be between 1000 and 1000000")
+	}
+	return nil
+}
+
+func validateGeoIPSource(value string) error {
+	if value == "" {
+		return nil
+	}
+	if strings.TrimSpace(value) != value {
+		return errors.New("geoip_country_source must not contain surrounding whitespace")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return errors.New("geoip_country_source must be a local path or HTTPS URL")
+	}
+	if parsed.Scheme == "" {
+		return nil
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("geoip_country_source remote URL must use HTTPS without userinfo or fragment")
 	}
 	return nil
 }
@@ -497,12 +519,12 @@ func (c ClientFile) ValidateStrict(adminAddr, serverAddr string) error {
 
 func (c ClientFile) validate(adminAddr, serverAddr string, allowLegacyMetadata bool) error {
 	clientIDs := map[string]struct{}{}
-	proxyIDs := map[string]struct{}{}
 	ports := reservedPorts(adminAddr, serverAddr)
 	for _, client := range c.ClientConfig {
 		if err := validateClientIdentity(client, clientIDs, allowLegacyMetadata); err != nil {
 			return err
 		}
+		proxyIDs := map[string]struct{}{}
 		for _, proxy := range client.ProxyList {
 			if err := validateProxyBinding(proxy, proxyIDs, ports); err != nil {
 				return err

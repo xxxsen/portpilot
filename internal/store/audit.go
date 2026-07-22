@@ -69,7 +69,7 @@ var (
 		"external_access_denied", "udp_drop", "proxy_protocol_write_failed", "security",
 	}
 	auditCategories = map[string]struct{}{
-		"auth": {}, "config": {}, "client": {}, "security": {}, "system": {},
+		"admin": {}, "auth": {}, "config": {}, "client": {}, "security": {}, "system": {},
 	}
 	auditOutcomes = map[string]struct{}{
 		"success": {}, "failure": {}, "denied": {}, "pending": {}, "unknown": {},
@@ -78,7 +78,7 @@ var (
 		"admin": {}, "client": {}, "system": {}, "external": {},
 	}
 	auditEventTypes = map[string]struct{}{
-		"admin_login": {}, "admin_logout": {}, "config_update": {},
+		"admin_login": {}, "admin_logout": {}, "data_export": {}, "config_update": {},
 		"client_created": {}, "client_updated": {}, "client_token_rotated": {},
 		"admin_client_disconnect": {}, "client_session": {},
 		"client_agent_invalid": {}, "database_rebuilt": {},
@@ -337,6 +337,10 @@ func normalizeAuditQuery(query AuditQuery) (AuditQuery, error) {
 	return query, nil
 }
 
+func NormalizeAuditQuery(query AuditQuery) (AuditQuery, error) {
+	return normalizeAuditQuery(query)
+}
+
 func auditWhere(query AuditQuery) (string, []any) {
 	clauses := []string{"event_type NOT IN (?, ?, ?, ?)"}
 	arguments := make([]any, 0, len(runtimeLogEventTypes)+8)
@@ -441,27 +445,28 @@ func (s *Store) AuditDetail(ctx context.Context, id string) (AuditEvent, error) 
 }
 
 func (s *Store) ResolvePendingAudits(ctx context.Context, currentRevision uint64) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, details_json
+	rows, err := s.db.QueryContext(ctx, `SELECT id, event_type, details_json
 		FROM audit_events WHERE outcome='pending' ORDER BY occurred_at`)
 	if err != nil {
 		return 0, fmt.Errorf("query pending audit events: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	type pendingEvent struct {
-		id      string
-		details map[string]any
+		id        string
+		eventType string
+		details   map[string]any
 	}
 	var pending []pendingEvent
 	for rows.Next() {
-		var id, detailsJSON string
-		if err := rows.Scan(&id, &detailsJSON); err != nil {
+		var id, eventType, detailsJSON string
+		if err := rows.Scan(&id, &eventType, &detailsJSON); err != nil {
 			return 0, fmt.Errorf("scan pending audit event: %w", err)
 		}
 		details := map[string]any{}
 		if err := json.Unmarshal([]byte(detailsJSON), &details); err != nil {
 			return 0, fmt.Errorf("decode pending audit details: %w", err)
 		}
-		pending = append(pending, pendingEvent{id: id, details: details})
+		pending = append(pending, pendingEvent{id: id, eventType: eventType, details: details})
 	}
 	if err := rows.Err(); err != nil {
 		return 0, fmt.Errorf("iterate pending audit events: %w", err)
@@ -471,6 +476,10 @@ func (s *Store) ResolvePendingAudits(ctx context.Context, currentRevision uint64
 		outcome := "unknown"
 		reasonCode := "server_interrupted"
 		reason := "server stopped before the configuration audit was finalized"
+		if event.eventType == "data_export" {
+			reasonCode = "server_restart"
+			reason = "server restarted before the export was finalized"
+		}
 		if ok && target <= currentRevision {
 			outcome = "success"
 			reasonCode = "recovered_after_restart"

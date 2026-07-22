@@ -1,7 +1,7 @@
 "use client";
 
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
-import {ChevronLeft, ChevronRight, RefreshCw, Search, X} from "lucide-react";
+import {ChevronLeft, ChevronRight, Download, RefreshCw, Search, X} from "lucide-react";
 import {
   CartesianGrid,
   Line,
@@ -12,7 +12,9 @@ import {
   YAxis,
 } from "recharts";
 import {api} from "@/lib/api";
+import type {ReactNode} from "react";
 import type {
+  AnalyticsComparison,
   AnalyticsCountry,
   AnalyticsDimension,
   AnalyticsIPSeries,
@@ -22,9 +24,11 @@ import type {
   NetworkClient,
   Page,
 } from "@/lib/types";
+import {ExportDialog} from "@/components/export/export-dialog";
+import {MetricDelta, PeriodComparison} from "@/components/network/period-comparison";
 
 export type AnalyticsRangeSelection = "1h" | "24h" | "7d" | "30d" | "90d" | "custom";
-export type TopMetric = "connections" | "traffic";
+type TopMetric = "connections" | "traffic";
 
 type DimensionsResponse = Page<AnalyticsDimension> & Pick<AnalyticsOverview, "range" | "scope" | "completeness">;
 
@@ -38,7 +42,6 @@ type Props = {
   proxyID: string;
   sourceIP: string;
   topK: 5 | 10 | 20;
-  topMetric: TopMetric;
   clients: NetworkClient[];
   onRangeChange: (range: AnalyticsRangeSelection) => void;
   onCustomFromChange: (value: string) => void;
@@ -46,8 +49,8 @@ type Props = {
   onScopeChange: (clientID: string, proxyID: string) => void;
   onSourceIPChange: (sourceIP: string) => void;
   onTopKChange: (value: 5 | 10 | 20) => void;
-  onTopMetricChange: (value: TopMetric) => void;
   onViewHistory: (sourceIP: string) => void;
+  csrf: string;
   onUnauthorized: () => void;
 };
 
@@ -74,6 +77,10 @@ export function HistoryInsights(props: Props) {
     completeness: emptyCompleteness(),
   });
   const [rankings, setRankings] = useState<AnalyticsTopIPs | null>(null);
+  const [comparison, setComparison] = useState<AnalyticsComparison | null>(null);
+  const [comparisonUnavailable, setComparisonUnavailable] = useState(false);
+  const [overlayPrevious, setOverlayPrevious] = useState(false);
+  const [dimensionExportOpen, setDimensionExportOpen] = useState(false);
   const [ipDetail, setIPDetail] = useState<AnalyticsIPSeries | null>(null);
   const [dimensionPage, setDimensionPage] = useState(1);
   const [dimensionSort, setDimensionSort] = useState("traffic_desc");
@@ -122,15 +129,29 @@ export function HistoryInsights(props: Props) {
     const topParams = new URLSearchParams(commonParams);
     topParams.set("k", String(topK));
     try {
-      const [overviewResult, dimensionResult, rankingResult] = await Promise.all([
+      const [overviewResult, dimensionResult, rankingResult, comparisonResult] = await Promise.all([
         api<AnalyticsOverview>(`/api/network/analytics/overview?${commonParams}`, {signal: controller.signal}),
         api<DimensionsResponse>(`/api/network/analytics/dimensions?${dimensionParams}`, {signal: controller.signal}),
         api<AnalyticsTopIPs>(`/api/network/analytics/top-ips?${topParams}`, {signal: controller.signal}),
+        api<AnalyticsComparison>(`/api/network/analytics/comparison?`, {signal: controller.signal})
+          .then((value) => ({value, failed: false}))
+          .catch((caught) => {
+            if (controller.signal.aborted || (caught instanceof Error && "status" in caught && caught.status === 401)) {
+              throw caught;
+            }
+            return {value: null, failed: true};
+          }),
       ]);
       if (sequence !== requestSequence.current) return;
       setOverview(overviewResult);
       setDimensions(dimensionResult);
       setRankings(rankingResult);
+      if (!comparisonResult.failed) {
+        setComparison(comparisonResult.value);
+        setComparisonUnavailable(false);
+      } else {
+        setComparisonUnavailable(true);
+      }
       setLoaded(true);
       setStale(false);
     } catch (caught) {
@@ -259,12 +280,12 @@ export function HistoryInsights(props: Props) {
     <section className="insight-section" aria-label="历史指标">
       <div className="section-heading"><div><h2>历史指标</h2><p>只统计已关闭、失败或中断的连接</p></div></div>
       <div className="metric-strip history-metrics">
-        <Metric label="历史连接" value={overview?.connections ?? 0} />
-        <Metric label="独立来源 IP" value={overview?.unique_ips ?? 0} />
+        <Metric label="历史连接" value={overview?.connections ?? 0} delta={<MetricDelta change={comparison?.metrics.connections} />} />
+        <Metric label="独立来源 IP" value={overview?.unique_ips ?? 0} delta={<MetricDelta change={comparison?.metrics.unique_ips} />} />
         <Metric label="国家/地区" value={overview?.countries ?? 0} />
-        <Metric label="失败率" value={formatPercent(overview?.failure_rate ?? 0)} />
-        <Metric label="上传" value={formatBytes(overview?.up_bytes ?? 0)} />
-        <Metric label="下载" value={formatBytes(overview?.down_bytes ?? 0)} />
+        <Metric label="失败率" value={formatPercent(overview?.failure_rate ?? 0)} delta={<MetricDelta change={comparison?.metrics.failure_rate} tone="failure" />} />
+        <Metric label="上传" value={formatBytes(overview?.up_bytes ?? 0)} delta={<MetricDelta change={comparison?.metrics.up_bytes} />} />
+        <Metric label="下载" value={formatBytes(overview?.down_bytes ?? 0)} delta={<MetricDelta change={comparison?.metrics.down_bytes} />} />
       </div>
     </section>
 
@@ -279,6 +300,8 @@ export function HistoryInsights(props: Props) {
             {key: "down_bytes", name: "下载", color: "#b35f20", dashed: true},
           ]}
           formatter={formatBytes}
+          previous={comparison?.previous_series ?? []}
+          overlay={overlayPrevious}
         />
         <TrendChart
           title="连接趋势"
@@ -288,15 +311,19 @@ export function HistoryInsights(props: Props) {
             {key: "failures", name: "失败", color: "#ba3d3d", dashed: true},
           ]}
           formatter={(value) => String(value)}
+          previous={comparison?.previous_series ?? []}
+          overlay={overlayPrevious}
         />
       </div>
       <p className="chart-summary">估算流量 {formatBytes(overview?.completeness.estimated_bytes ?? 0)}，占区间总流量 {formatPercent(overview?.completeness.estimated_ratio ?? 0)}。</p>
     </section>
 
+    <PeriodComparison comparison={comparison} unavailable={comparisonUnavailable} overlay={overlayPrevious} onOverlayChange={setOverlayPrevious} />
+
     <section className="insight-section">
       <div className="section-heading dimension-heading">
         <div><h2>客户端 / 代理汇总</h2><p>选择一行可将下方排名和 IP 曲线限定到该代理</p></div>
-        <strong className="section-count">{dimensions.total}</strong>
+        <div className="heading-actions"><strong className="section-count">{dimensions.total}</strong><button className="icon-button" onClick={() => setDimensionExportOpen(true)} title="导出筛选结果" aria-label="导出代理汇总"><Download size={17} /></button></div>
       </div>
       <div className="filter-bar insight-dimension-filters">
         <label className="search-control"><Search size={16} /><input
@@ -364,15 +391,24 @@ export function HistoryInsights(props: Props) {
           <option value={5}>Top 5</option><option value={10}>Top 10</option><option value={20}>Top 20</option>
         </select>
       </div>
-      <div className="segmented mobile-ranking-tabs" aria-label="Top IP 排名指标">
-        <button className={props.topMetric === "connections" ? "selected" : ""} onClick={() => props.onTopMetricChange("connections")}>按连接数</button>
-        <button className={props.topMetric === "traffic" ? "selected" : ""} onClick={() => props.onTopMetricChange("traffic")}>按流量</button>
-      </div>
-      <div className={`ranking-grid show-${props.topMetric}`}>
-        <RankingTable title="连接数 Top K" metric="connections" items={rankings?.by_connections ?? []} selectedIP={props.sourceIP} highlightedCountry={highlightedCountry} onSelect={props.onSourceIPChange} />
-        <RankingTable title="流量 Top K" metric="traffic" items={rankings?.by_traffic ?? []} selectedIP={props.sourceIP} highlightedCountry={highlightedCountry} onSelect={props.onSourceIPChange} />
+      <div className="ranking-grid">
+        <RankingTable title="连接数 Top K" metric="connections" items={rankings?.by_connections ?? []} rankChanges={comparison?.connections_rank_changes ?? []} selectedIP={props.sourceIP} highlightedCountry={highlightedCountry} onSelect={props.onSourceIPChange} />
+        <RankingTable title="流量 Top K" metric="traffic" items={rankings?.by_traffic ?? []} rankChanges={comparison?.traffic_rank_changes ?? []} selectedIP={props.sourceIP} highlightedCountry={highlightedCountry} onSelect={props.onSourceIPChange} />
       </div>
     </section>
+
+    <ExportDialog
+      open={dimensionExportOpen}
+      onOpenChange={setDimensionExportOpen}
+      title="导出历史维度"
+      dataset="network_dimensions"
+      endpoint="/api/exports/network-dimensions"
+      filters={{range: props.range, from: props.range === "custom" ? new Date(props.customFrom).getTime() : 0, to: props.range === "custom" ? new Date(props.customTo).getTime() : 0, client_id: props.clientID && (props.view === "client" || props.proxyID) ? props.clientID : "", proxy_id: props.proxyID, protocol: props.protocol, query: dimensionQuery.trim(), sort: dimensionSort}}
+      filterSummary={["范围：" + props.range, props.clientID ? "客户端：" + props.clientID : "", props.proxyID ? "代理：" + props.proxyID : "", props.protocol ? "协议：" + props.protocol.toUpperCase() : "", dimensionQuery.trim() ? "搜索：" + dimensionQuery.trim() : ""].filter(Boolean)}
+      estimatedRows={dimensions.total}
+      csrf={props.csrf}
+      onUnauthorized={props.onUnauthorized}
+    />
 
     {props.sourceIP && <IPDetail
       detail={ipDetail?.source_ip === props.sourceIP ? ipDetail : null}
@@ -397,6 +433,7 @@ function RankingTable({
   title,
   metric,
   items,
+  rankChanges,
   selectedIP,
   highlightedCountry,
   onSelect,
@@ -404,6 +441,7 @@ function RankingTable({
   title: string;
   metric: TopMetric;
   items: AnalyticsTopIP[];
+  rankChanges: AnalyticsComparison["connections_rank_changes"];
   selectedIP: string;
   highlightedCountry: string;
   onSelect: (ip: string) => void;
@@ -411,7 +449,7 @@ function RankingTable({
   return <div className={`ranking-table ranking-${metric}`}>
     <h3>{title}</h3>
     <div className="table-wrap"><table>
-      <thead><tr><th>排名 / IP</th><th>国家</th><th>连接</th><th>流量</th><th>占比</th><th>最近活动</th></tr></thead>
+      <thead><tr><th>排名 / IP</th><th>变化</th><th>国家</th><th>连接</th><th>流量</th><th>占比</th><th>最近活动</th></tr></thead>
       <tbody>
         {items.map((item) => {
           const share = metric === "connections" ? item.connection_share : item.traffic_share;
@@ -425,13 +463,14 @@ function RankingTable({
             }}
           >
             <td><strong>#{item.rank} <span className="mono">{item.source_ip}</span></strong></td>
+            <td>{rankChangeLabel(rankChanges.find((value) => value.source_ip === item.source_ip))}</td>
             <td>{countryLabel(item.geo_kind, item.country_code)}</td>
             <td>{item.connections}</td><td>{formatBytes(item.up_bytes + item.down_bytes)}</td>
             <td><div className="share-value"><span style={{width: `${Math.min(100, share * 100)}%`}} /><b>{formatPercent(share)}</b></div></td>
             <td>{formatDate(item.last_seen_at)}</td>
           </tr>;
         })}
-        {!items.length && <tr><td colSpan={6}><div className="empty-inline">当前范围没有来源 IP</div></td></tr>}
+        {!items.length && <tr><td colSpan={7}><div className="empty-inline">当前范围没有来源 IP</div></td></tr>}
       </tbody>
     </table></div>
   </div>;
@@ -548,17 +587,31 @@ function TrendChart({
   data,
   lines,
   formatter,
+  previous = [],
+  overlay = false,
 }: {
   title: string;
   data: AnalyticsOverview["series"];
   lines: Array<{key: "up_bytes" | "down_bytes" | "connections" | "failures"; name: string; color: string; dashed?: boolean}>;
   formatter: (value: number) => string;
+  previous?: AnalyticsComparison["previous_series"];
+  overlay?: boolean;
 }) {
+  const points = new Map<number, Record<string, number>>();
+  for (const point of data) points.set(point.bucket_at, {...point});
+  if (overlay) {
+    for (const point of previous) {
+      const target = points.get(point.aligned_bucket_at) ?? {bucket_at: point.aligned_bucket_at};
+      for (const line of lines) target[line.key + "_previous"] = point[line.key];
+      points.set(point.aligned_bucket_at, target);
+    }
+  }
+  const chartData = [...points.values()].sort((left, right) => left.bucket_at - right.bucket_at);
   return <div className="insight-chart" aria-label={title}>
     <h3>{title}</h3>
     <div>
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={chartMargin}>
+        <LineChart data={chartData} margin={chartMargin}>
           <CartesianGrid stroke="#e4e9eb" vertical={false} />
           <XAxis dataKey="bucket_at" tickFormatter={(value) => formatChartTime(Number(value))} minTickGap={30} />
           <YAxis tickFormatter={(value) => formatter(Number(value))} tickMargin={8} width={78} />
@@ -571,6 +624,18 @@ function TrendChart({
             stroke={line.color}
             strokeWidth={2}
             strokeDasharray={line.dashed ? "6 4" : undefined}
+            dot={false}
+            isAnimationActive={false}
+          />)}
+          {overlay && lines.map((line) => <Line
+            key={line.key + "_previous"}
+            type="monotone"
+            dataKey={line.key + "_previous"}
+            name={line.name + "（上一周期）"}
+            stroke={line.color}
+            strokeOpacity={0.55}
+            strokeWidth={1.5}
+            strokeDasharray="3 4"
             dot={false}
             isAnimationActive={false}
           />)}
@@ -610,8 +675,8 @@ function Pagination({
   </div>;
 }
 
-function Metric({label, value}: {label: string; value: string | number}) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
+function Metric({label, value, delta}: {label: string; value: string | number; delta?: ReactNode}) {
+  return <div><span>{label}</span><strong>{value}</strong>{delta}</div>;
 }
 
 function countryLabel(kind: string, code: string) {
@@ -681,4 +746,13 @@ function emptyCompleteness(): AnalyticsOverview["completeness"] {
     geoip_status: "disabled",
     geoip_database_fingerprint: "",
   };
+}
+
+function rankChangeLabel(value: AnalyticsComparison["connections_rank_changes"][number] | undefined) {
+  if (!value) return "-";
+  if (value.status === "new") return "新";
+  if (value.status === "same") return "—";
+  if (value.status === "up") return `↑${value.rank_change ?? ""}`;
+  if (value.status === "down") return `↓${Math.abs(value.rank_change ?? 0)}`;
+  return "退出";
 }

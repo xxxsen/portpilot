@@ -6,9 +6,11 @@ PortPilot 是一个由服务端集中管理代理规则、由客户端访问内�
 
 本文记录已经落地且需要长期保持的架构、协议、安全和运行时契约。管理后台、审计、连接活动、
 SQLite migration 和 CLI 的详细契约见
-[`002-admin-console-and-cli-improvements.md`](002-admin-console-and-cli-improvements.md)，历史
-聚合、Top K、GeoIP 和 IP 下钻见
-[`003-network-history-analytics.md`](003-network-history-analytics.md)。具体默认参数以配置
+[`002-admin-console-and-cli-improvements.md`](002-admin-console-and-cli-improvements.md)，历史聚合、
+Top K、GeoIP 和 IP 下钻见
+[`003-network-history-analytics.md`](003-network-history-analytics.md)，运行可见性、搜索、周期对比、
+导出和 cache 生命周期见
+[`004-operational-insights-and-navigation.md`](004-operational-insights-and-navigation.md)。具体默认参数以配置
 校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
 
 核心边界：
@@ -93,7 +95,7 @@ PortPilot 使用三类配置：
 
 | 配置 | 所有者 | 内容 |
 | --- | --- | --- |
-| 服务端主配置 | 服务端 | 管理/数据监听地址、管理员、代理配置路径、SQLite 路径、数据面参数、超时、限额和日志 |
+| 服务端主配置 | 服务端 | 管理/数据监听地址、管理员、代理配置路径、cache 根目录、数据面参数、超时、限额和日志 |
 | 客户端与代理配置 | 服务端 | 客户端 ID、token、启停状态和代理规则 |
 | 客户端运行配置 | 客户端 | 服务端地址、TLS、外部路径、客户端 ID、token 和日志 |
 
@@ -112,7 +114,7 @@ PortPilot 使用三类配置：
 | `real_ip_header` | Admin 与客户端控制入口读取真实来源的 HTTP header；空值回退 socket peer |
 | `users` | 管理员账号和 bcrypt password hash |
 | `client_config_file` | 客户端与代理配置文件路径 |
-| `data_db` | SQLite 路径 |
+| `cache_dir` | SQLite、远程 GeoIP 等可重建派生数据的易失缓存根目录 |
 | `access_policy` | 动态代理端口的全局外部来源 CIDR allow/deny |
 | `data_plane` | transport、smux pool 和 UDP 参数 |
 | `timeouts` | 握手、心跳、建链、空闲和最长生命周期 |
@@ -180,7 +182,8 @@ PortPilot 使用三类配置：
 
 稳定约束：
 
-- `client_id` 和 `proxy_id` 必须全局唯一且不依赖数组下标。
+- `client_id` 全局唯一；`proxy_id` 在所属客户端内唯一，代理完整标识为 `(client_id, proxy_id)`，
+  且不依赖数组下标。
 - `client_token` 必须由密码学安全随机数生成，不能使用短口令。
 - `remark` 是客户端的必填可读名称。
 - `created_at` 和 `updated_at` 是服务端权威的 Unix 毫秒时间戳。
@@ -535,14 +538,14 @@ frame type：
 服务端维护：
 
 ```text
-(session_epoch, proxy_id, external_source) -> flow_id, channel_id
-(session_epoch, proxy_id, flow_id) -> external_source
+(client_id, session_epoch, proxy_id, external_source) -> flow_id, channel_id
+(client_id, session_epoch, proxy_id, flow_id) -> external_source
 ```
 
 客户端维护：
 
 ```text
-(session_epoch, proxy_id, flow_id) -> UDP socket connected to target
+(client_id, session_epoch, proxy_id, flow_id) -> UDP socket connected to target
 ```
 
 处理规则：
@@ -563,8 +566,8 @@ frame type：
 运行态必须分为不同所有权域：
 
 ```text
-DesiredConfig    proxy_id -> immutable ProxySpec
-ListenerRegistry proxy_id -> TCP/UDP ListenerHandle
+DesiredConfig    client_id + proxy_id -> immutable ProxySpec
+ListenerRegistry client_id + proxy_id -> TCP/UDP ListenerHandle
 SessionRegistry  client_id -> current ActiveSession
 MuxRegistry      client_id + epoch + mux_id -> Active/Draining MuxSession
 TunnelRegistry   connection/channel/flow -> Pending or Active runtime

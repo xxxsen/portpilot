@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react";
+import {ChevronLeft, ChevronRight, Download, RefreshCw, Search} from "lucide-react";
 import {
   CartesianGrid,
   Line,
@@ -11,7 +11,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import type {
   NetworkClient,
   NetworkConnection,
@@ -19,11 +19,11 @@ import type {
   NetworkSummary,
   Page,
 } from "@/lib/types";
-import { Dialog } from "@/components/ui/dialog";
+import {Dialog} from "@/components/ui/dialog";
+import {ExportDialog} from "@/components/export/export-dialog";
 import {
   HistoryInsights,
   type AnalyticsRangeSelection,
-  type TopMetric,
 } from "@/components/network/history-insights";
 
 type ConnectionView = "active" | "history";
@@ -33,11 +33,12 @@ const historicalStates = ["", "closed", "failed", "interrupted"];
 const sorts = ["accepted_desc", "accepted_asc", "traffic_desc", "duration_desc"];
 const detailChartMargin = {top: 16, right: 10, bottom: 6, left: 4};
 
-export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
+export function NetworkPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized: () => void}) {
   const initial = useMemo(() => typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search), []);
   const [view, setView] = useState<"overall" | "client">(initial.get("network_view") === "client" ? "client" : "overall");
   const [section, setSection] = useState<NetworkSection>(initial.get("network_section") === "connections" ? "connections" : "insights");
   const [connectionView, setConnectionView] = useState<ConnectionView>(initial.get("connection_view") === "history" ? "history" : "active");
+  const initialActivityID = initial.get("activity_id") ?? "";
   const initialRange = initial.get("range") ?? "";
   const initialActivePage = Number(initial.get("active_page"));
   const initialHistoryPage = Number(initial.get("history_page") ?? initial.get("page"));
@@ -51,7 +52,6 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
   const [proxyID, setProxyID] = useState(initial.get("proxy_id") ?? "");
   const [sourceIP, setSourceIP] = useState(initial.get("source_ip") ?? "");
   const [topK, setTopK] = useState<5 | 10 | 20>([5, 10, 20].includes(Number(initial.get("top_k"))) ? Number(initial.get("top_k")) as 5 | 10 | 20 : 10);
-  const [topMetric, setTopMetric] = useState<TopMetric>(initial.get("top_metric") === "traffic" ? "traffic" : "connections");
   const [historyState, setHistoryState] = useState(historicalStates.includes(initial.get("state") ?? "") ? initial.get("state") ?? "" : "");
   const [sort, setSort] = useState(sorts.includes(initial.get("sort") ?? "") ? initial.get("sort") ?? "accepted_desc" : "accepted_desc");
   const [query, setQuery] = useState((initial.get("query") ?? "").slice(0, 128));
@@ -62,6 +62,8 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
   const [historyConnections, setHistoryConnections] = useState<Page<NetworkConnection>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
   const [clients, setClients] = useState<NetworkClient[]>([]);
   const [detail, setDetail] = useState<NetworkDetail | null>(null);
+  const [deepLinkError, setDeepLinkError] = useState("");
+  const [connectionExportOpen, setConnectionExportOpen] = useState(false);
   const [loadedViews, setLoadedViews] = useState<Record<ConnectionView, boolean>>({active: false, history: false});
   const [stale, setStale] = useState(false);
   const requestSequence = useRef(0);
@@ -136,7 +138,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     setOptionalParam(params, "proxy_id", proxyID);
     setOptionalParam(params, "source_ip", sourceIP);
     setOptionalParam(params, "top_k", topK === 10 ? "" : String(topK));
-    setOptionalParam(params, "top_metric", topMetric === "connections" ? "" : topMetric);
+    params.delete("top_metric");
     setOptionalParam(params, "state", historyState);
     setOptionalParam(params, "sort", sort === "accepted_desc" ? "" : sort);
     setOptionalParam(params, "query", query);
@@ -144,7 +146,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     setOptionalParam(params, "active_page", activePage === 1 ? "" : String(activePage));
     setOptionalParam(params, "history_page", historyPage === 1 ? "" : String(historyPage));
     window.history.replaceState(null, "", `${window.location.pathname}?${params}`);
-  }, [activePage, clientID, connectionView, customFrom, customTo, historyPage, historyState, protocol, proxyID, query, range, section, sort, sourceIP, topK, topMetric, view]);
+  }, [activePage, clientID, connectionView, customFrom, customTo, historyPage, historyState, protocol, proxyID, query, range, section, sort, sourceIP, topK, view]);
 
   useEffect(() => {
     const initialTimer = window.setTimeout(() => void load(), 0);
@@ -172,6 +174,32 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
     };
   }, [load]);
 
+  const updateActivityURL = useCallback((activityID = "") => {
+    const params = new URLSearchParams(window.location.search);
+    if (activityID) params.set("activity_id", activityID);
+    else params.delete("activity_id");
+    window.history.replaceState(null, "", window.location.pathname + "?" + params.toString());
+  }, []);
+
+  const openConnection = useCallback(async (activityID: string) => {
+    try {
+      const value = await api<NetworkDetail>(`/api/network/connections/${encodeURIComponent(activityID)}`);
+      setDetail(value);
+      setDeepLinkError("");
+      updateActivityURL(activityID);
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) onUnauthorized();
+      else setDeepLinkError("对象不存在或已被删除");
+      updateActivityURL();
+    }
+  }, [onUnauthorized, updateActivityURL]);
+
+  useEffect(() => {
+    if (!initialActivityID) return;
+    const timer = window.setTimeout(() => void openConnection(initialActivityID), 0);
+    return () => window.clearTimeout(timer);
+  }, [initialActivityID, openConnection]);
+
   const selectedClient = clients.find((client) => client.client_id === clientID);
   return (
     <section className="section-block first">
@@ -196,6 +224,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
           {selectedClient && <div className="client-context"><strong>{selectedClient.client_remark}</strong><span className="mono">{selectedClient.client_id}</span><span>{selectedClient.online ? "在线" : "离线"} · epoch {selectedClient.session_epoch || "-"} · smux {selectedClient.mux_sessions}</span></div>}
         </div>
       )}
+      {deepLinkError && <div className="stale-banner">{deepLinkError}</div>}
       {stale && <div className="stale-banner">网络活动刷新失败，当前数据可能已过期</div>}
       <section className="current-status-band" aria-label="当前状态">
         <div><span>当前活跃连接</span><strong>{summary?.active_connections ?? 0}</strong></div>
@@ -215,7 +244,6 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         proxyID={proxyID}
         sourceIP={sourceIP}
         topK={topK}
-        topMetric={topMetric}
         clients={clients}
         onRangeChange={setRange}
         onCustomFromChange={setCustomFrom}
@@ -226,22 +254,22 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         }}
         onSourceIPChange={setSourceIP}
         onTopKChange={setTopK}
-        onTopMetricChange={setTopMetric}
         onViewHistory={(ip) => {
           setSection("connections");
           setConnectionView("history");
           setQuery(ip);
           setHistoryPage(1);
         }}
+        csrf={csrf}
         onUnauthorized={onUnauthorized}
       />}
       {section === "connections" && <section className="section-block connections-section">
         <div className="section-heading connections-heading">
           <div><h2>连接</h2><p>选择查看当前存活连接或已结束的历史连接</p></div>
-          <div className="segmented connection-tabs" aria-label="连接类型">
+          <div className="heading-actions"><div className="segmented connection-tabs" aria-label="连接类型">
             <button className={connectionView === "active" ? "selected" : ""} onClick={() => setConnectionView("active")}>实时连接</button>
             <button className={connectionView === "history" ? "selected" : ""} onClick={() => setConnectionView("history")}>历史连接</button>
-          </div>
+          </div><button className="icon-button" onClick={() => setConnectionExportOpen(true)} title="导出筛选结果" aria-label="导出连接"><Download size={17} /></button></div>
         </div>
         <div className="filter-bar network-filters">
           <label className="search-control"><Search size={16} /><input aria-label="搜索连接" maxLength={128} value={query} onChange={(event) => {setQuery(event.target.value); setActivePage(1); setHistoryPage(1);}} placeholder="活动、客户端、代理或地址" /></label>
@@ -250,7 +278,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
         {connectionView === "active" ? <section className="connection-panel live-connection-panel">
           <div className="section-heading"><div><h2>实时连接</h2><p>当前仍存活的连接；速率为服务端最近采样窗口的平均值</p></div><strong className="section-count">{activeConnections.total}</strong></div>
           <div className="table-wrap"><table className="live-connections-table responsive-table"><thead><tr><th>建链时间</th><th>客户端 / 代理</th><th>协议</th><th>来源 → 目标</th><th>状态 / 采样</th><th>上行速率</th><th>下行速率</th><th>累计流量</th><th className="live-rate-mobile">实时速率</th></tr></thead><tbody>
-            {activeConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void api<NetworkDetail>(`/api/network/connections/${connection.activity_id}`).then(setDetail)}>
+            {activeConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void openConnection(connection.activity_id)}>
               <td>{new Date(connection.connected_at ?? connection.accepted_at).toLocaleString()}</td><td><strong>{connection.client_remark}</strong><small>{connection.proxy_remark} · {connection.proxy_id}</small></td><td><span className={`network-tag ${connection.protocol}`}>{connection.protocol.toUpperCase()}</span></td><td className="mono address-cell">{connection.external_addr}<br />{connection.target_addr}</td><td>{formatConnectionState(connection.state)}<small>{formatRateWindow(connection.rate_window_millis)}</small></td><td className="rate-cell">{formatRate(connection.up_bytes_per_second)}</td><td className="rate-cell">{formatRate(connection.down_bytes_per_second)}</td><td>{formatBytes(connection.up_bytes + connection.down_bytes)}</td><td className="live-rate-mobile"><strong>↑ {formatRate(connection.up_bytes_per_second)}</strong><small>↓ {formatRate(connection.down_bytes_per_second)}</small></td>
             </tr>)}
             {!activeConnections.items.length && <tr><td colSpan={9}><div className="empty-inline">{loadedViews.active ? "当前没有符合条件的实时连接" : "正在加载实时连接"}</div></td></tr>}
@@ -263,7 +291,7 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
             <select aria-label="历史连接排序" value={sort} onChange={(event) => {setSort(event.target.value); setHistoryPage(1);}}><option value="accepted_desc">最新优先</option><option value="accepted_asc">最早优先</option><option value="traffic_desc">流量优先</option><option value="duration_desc">时长优先</option></select>
           </div>
           <div className="table-wrap"><table className="history-connections-table responsive-table"><thead><tr><th>时间</th><th>客户端 / 代理</th><th>协议</th><th>来源 → 目标</th><th>结果</th><th>上传</th><th>下载</th><th className="mobile-table-cell">总流量</th></tr></thead><tbody>
-            {historyConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void api<NetworkDetail>(`/api/network/connections/${connection.activity_id}`).then(setDetail)}>
+            {historyConnections.items.map((connection) => <tr key={connection.activity_id} className="clickable-row" onClick={() => void openConnection(connection.activity_id)}>
               <td>{new Date(connection.accepted_at).toLocaleString()}</td><td><strong>{connection.client_remark}</strong><small>{connection.proxy_remark} · {connection.proxy_id}</small></td><td><span className={`network-tag ${connection.protocol}`}>{connection.protocol.toUpperCase()}</span></td><td className="mono address-cell">{connection.external_addr}<br />{connection.target_addr}</td><td>{formatConnectionState(connection.state)}</td><td>{formatBytes(connection.up_bytes)}</td><td>{formatBytes(connection.down_bytes)}</td><td className="mobile-table-cell">{formatBytes(connection.up_bytes + connection.down_bytes)}</td>
             </tr>)}
             {!historyConnections.items.length && <tr><td colSpan={8}><div className="empty-inline">{loadedViews.history ? "没有符合条件的历史连接" : "正在加载历史连接"}</div></td></tr>}
@@ -271,7 +299,19 @@ export function NetworkPage({onUnauthorized}: {onUnauthorized: () => void}) {
           <Pagination page={historyPage} total={historyConnections.total} totalPages={historyConnections.total_pages} onPageChange={setHistoryPage} label="历史连接" />
         </section>}
       </section>}
-      <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title="连接详情" description={detail?.activity_id} side>
+      <ExportDialog
+        open={connectionExportOpen}
+        onOpenChange={setConnectionExportOpen}
+        title="导出连接明细"
+        dataset="network_connections"
+        endpoint="/api/exports/network-connections"
+        filters={{scope: connectionView, query, client_id: selectedClient ? selectedClient.client_id : "", protocol, state: connectionView === "history" ? historyState : "", date_from: "", date_to: "", sort: connectionView === "history" ? sort : "accepted_desc"}}
+        filterSummary={[connectionView === "active" ? "实时连接" : "历史连接", selectedClient ? "客户端：" + selectedClient.client_id : "", protocol ? "协议：" + protocol.toUpperCase() : "", historyState ? "状态：" + historyState : "", query ? "搜索：" + query : ""].filter(Boolean)}
+        estimatedRows={connectionView === "active" ? activeConnections.total : historyConnections.total}
+        csrf={csrf}
+        onUnauthorized={onUnauthorized}
+      />
+      <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) {setDetail(null); updateActivityURL();}}} title="连接详情" description={detail?.activity_id} side>
         {detail && <NetworkDetailView detail={detail} />}
       </Dialog>
     </section>
