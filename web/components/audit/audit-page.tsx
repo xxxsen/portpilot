@@ -6,13 +6,12 @@ import { api } from "@/lib/api";
 import type { AuditEvent, Page } from "@/lib/types";
 import {Dialog} from "@/components/ui/dialog";
 import {ExportDialog} from "@/components/export/export-dialog";
-
-const eventTypes = [
-  "admin_login", "admin_logout", "data_export", "config_update", "client_created", "client_updated",
-  "client_token_rotated", "admin_client_disconnect", "client_session",
-  "client_agent_invalid", "database_rebuilt", "system_start", "system_stop",
-  "config_metadata_migrated", "knock_grant_created", "knock_grant_revoked",
-];
+import {
+  auditCategoryLabel,
+  auditEventLabel,
+  auditEventOptions,
+  auditOutcomeLabel,
+} from "@/lib/audit-events";
 
 export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized: () => void}) {
   const [result, setResult] = useState<Page<AuditEvent>>({items: [], page: 1, page_size: 25, total: 0, total_pages: 0});
@@ -90,7 +89,7 @@ export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized:
           <option value="">全部分类</option><option value="admin">管理</option><option value="auth">认证</option><option value="config">配置</option><option value="client">客户端</option><option value="security">安全</option><option value="system">系统</option>
         </select>
         <select aria-label="事件类型" value={eventType} onChange={(event) => {setEventType(event.target.value); setPage(1);}}>
-          <option value="">全部事件</option>{eventTypes.map((value) => <option key={value}>{value}</option>)}
+          <option value="">全部事件</option>{auditEventOptions.map((event) => <option key={event.value} value={event.value}>{event.label}</option>)}
         </select>
         <select aria-label="事件结果" value={outcome} onChange={(event) => {setOutcome(event.target.value); setPage(1);}}>
           <option value="">全部结果</option><option value="success">成功</option><option value="failure">失败</option><option value="denied">拒绝</option><option value="pending">等待</option><option value="unknown">未知</option>
@@ -107,7 +106,7 @@ export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized:
             {result.items.map((event) => (
               <tr key={event.id} className="clickable-row" onClick={() => void api<AuditEvent>(`/api/events/${event.id}`).then(setDetail)}>
                 <td><time title={new Date(event.occurred_at).toISOString()}>{new Date(event.occurred_at).toLocaleString()}</time></td>
-                <td><strong>{event.event_type}</strong><small>{event.category}</small></td>
+                <td><strong>{auditEventLabel(event.event_type)}</strong><small>{auditCategoryLabel(event.category)}</small></td>
                 <td>{event.actor_id || event.actor_type}</td>
                 <td className="mono audit-source-ip">{event.source_addr || "-"}</td>
                 <td>{event.client_id || event.proxy_id || event.connection_id || "-"}</td>
@@ -127,12 +126,12 @@ export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized:
         dataset="audit_events"
         endpoint="/api/exports/audit-events"
         filters={auditExportFilters(query, category, eventType, outcome, dateFrom, dateTo)}
-        filterSummary={[query ? "搜索：" + query : "", category ? "分类：" + category : "", eventType ? "事件：" + eventType : "", outcome ? "结果：" + outcome : "", dateFrom ? "开始：" + dateFrom : "", dateTo ? "结束：" + dateTo : ""].filter(Boolean)}
+        filterSummary={[query ? "搜索：" + query : "", category ? "分类：" + auditCategoryLabel(category) : "", eventType ? "事件：" + auditEventLabel(eventType) : "", outcome ? "结果：" + auditOutcomeLabel(outcome) : "", dateFrom ? "开始：" + dateFrom : "", dateTo ? "结束：" + dateTo : ""].filter(Boolean)}
         estimatedRows={result.total}
         csrf={csrf}
         onUnauthorized={onUnauthorized}
       />
-      <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title={detail?.event_type ?? "事件详情"} description={detail ? `${new Date(detail.occurred_at).toLocaleString()} · ${detail.id}` : undefined} side>
+      <Dialog open={Boolean(detail)} onOpenChange={(open) => {if (!open) setDetail(null);}} title={detail ? auditEventLabel(detail.event_type) : "事件详情"} description={detail ? `${new Date(detail.occurred_at).toLocaleString()} · ${detail.id}` : undefined} side>
         {detail && <AuditDetail event={detail} />}
       </Dialog>
     </section>
@@ -190,11 +189,7 @@ function formatAuditTime(value: unknown) {
 }
 
 function Outcome({value}: {value: string}) {
-  const labels: Record<string, string> = {
-    success: "成功", failure: "失败", denied: "拒绝",
-    pending: "等待", unknown: "未知",
-  };
-  return <span className={`outcome outcome-${value}`}>{labels[value] ?? value}</span>;
+  return <span className={`outcome outcome-${value}`}>{auditOutcomeLabel(value)}</span>;
 }
 
 function Pagination({page, totalPages, total, pageSize, setPage, setPageSize}: {

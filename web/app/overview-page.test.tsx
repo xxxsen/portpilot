@@ -82,4 +82,19 @@ describe("OverviewPage", () => {
     expect(screen.getByText("operator")).toBeInTheDocument();
     expect(screen.getByText("成功")).toBeInTheDocument();
   });
+
+  it("uses the shared user-facing name for knock events", () => {
+    const knockEvent = {
+      ...recentEvent,
+      id: "audit-knock",
+      category: "security",
+      event_type: "knock_grant_created",
+      summary: "临时访问授权已创建",
+    };
+
+    render(<OverviewPage summary={null} clients={[client]} events={[knockEvent]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
+
+    expect(screen.getByText("创建临时访问授权")).toBeInTheDocument();
+    expect(screen.queryByText("knock_grant_created")).not.toBeInTheDocument();
+  });
 });

@@ -14,6 +14,7 @@ import {
   formatClientTime,
 } from "@/components/clients/client-detail-dialog";
 import {AttentionList} from "@/components/overview/attention-list";
+import {auditEventLabel, auditOutcomeLabel} from "@/lib/audit-events";
 
 export function OverviewPage({
   summary,
@@ -79,8 +80,8 @@ export function OverviewPage({
             <Activity size={16} />
             <div className="event-main">
               <div className="row-title">
-                <strong>{eventLabel(event.event_type)}</strong>
-                <span className={`outcome outcome-${event.outcome}`}>{outcomeLabel(event.outcome)}</span>
+                <strong>{auditEventLabel(event.event_type)}</strong>
+                <span className={`outcome outcome-${event.outcome}`}>{auditOutcomeLabel(event.outcome)}</span>
               </div>
               <p>{event.summary || event.reason_code || "无摘要"}</p>
             </div>
@@ -98,37 +99,6 @@ export function OverviewPage({
       <ClientDetailDialog client={detail} onClose={() => setDetailClientID("")} />
     </>
   );
-}
-
-function eventLabel(value: string) {
-  const labels: Record<string, string> = {
-    admin_login: "管理员登录",
-    admin_logout: "管理员退出",
-    data_export: "数据导出",
-    config_update: "配置变更",
-    client_created: "创建客户端",
-    client_updated: "更新客户端",
-    client_token_rotated: "轮换密钥",
-    admin_client_disconnect: "断开客户端",
-    client_session: "客户端会话",
-    client_agent_invalid: "Agent 异常",
-    database_rebuilt: "数据库重建",
-    system_start: "服务启动",
-    system_stop: "服务停止",
-    config_metadata_migrated: "配置元数据迁移",
-  };
-  return labels[value] ?? value;
-}
-
-function outcomeLabel(value: string) {
-  const labels: Record<string, string> = {
-    success: "成功",
-    failure: "失败",
-    denied: "拒绝",
-    pending: "等待",
-    unknown: "未知",
-  };
-  return labels[value] ?? value;
 }
 
 function eventObject(event: AuditEvent) {

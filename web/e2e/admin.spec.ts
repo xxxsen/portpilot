@@ -316,7 +316,8 @@ test("live status and audit views expose the formal server state", async ({page}
   await expect(page.getByRole("heading", {name: "事件与审计", level: 1})).toBeVisible();
   await expect(page.locator(".audit-table tbody tr").first()).toBeVisible();
   await expect(page.locator(".audit-table thead th").filter({hasText: /^IP$/})).toBeVisible();
-  const loginAudit = page.locator(".audit-table tbody tr").filter({hasText: "admin_login"}).first();
+  const loginAudit = page.locator(".audit-table tbody tr").filter({hasText: "管理员登录"}).first();
+  await expect(loginAudit).not.toContainText("admin_login");
   await expect(loginAudit.locator(".audit-source-ip")).not.toHaveText("-");
 });
 
@@ -405,7 +406,9 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await expect(page.getByText("配置已被其他会话更新，已重新载入最新版本")).toBeVisible();
 
     await navigate(page, "事件与审计");
-    await expect(page.getByRole("row").filter({hasText: "config_update"}).first()).toBeVisible();
+    const configAudit = page.getByRole("row").filter({hasText: "配置变更"}).first();
+    await expect(configAudit).toBeVisible();
+    await expect(configAudit).not.toContainText("config_update");
   } finally {
     await removeE2EProxies(page, csrf);
   }

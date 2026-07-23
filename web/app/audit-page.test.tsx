@@ -25,11 +25,13 @@ describe("AuditPage", () => {
     }));
 
     render(<AuditPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
-    expect(await screen.findByText("admin_login")).toBeInTheDocument();
+    expect(await screen.findByText("管理员登录")).toBeInTheDocument();
+    expect(screen.queryByText("admin_login")).not.toBeInTheDocument();
     expect(screen.getByRole("columnheader", {name: "IP"})).toBeInTheDocument();
     expect(await screen.findByText("203.0.113.8")).toBeInTheDocument();
 
     const eventFilter = screen.getByLabelText("事件类型");
+    expect(within(eventFilter).getByRole("option", {name: "管理员登录"})).toHaveValue("admin_login");
     for (const value of ["security", "external_access_denied", "udp_drop", "proxy_protocol_write_failed"]) {
       expect(within(eventFilter).queryByRole("option", {name: value})).not.toBeInTheDocument();
     }

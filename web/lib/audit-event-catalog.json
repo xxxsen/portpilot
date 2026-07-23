@@ -1,0 +1,18 @@
+[
+  {"value": "admin_login", "label": "管理员登录"},
+  {"value": "admin_logout", "label": "管理员退出"},
+  {"value": "data_export", "label": "数据导出"},
+  {"value": "config_update", "label": "配置变更"},
+  {"value": "client_created", "label": "创建客户端"},
+  {"value": "client_updated", "label": "更新客户端"},
+  {"value": "client_token_rotated", "label": "轮换客户端密钥"},
+  {"value": "admin_client_disconnect", "label": "断开客户端连接"},
+  {"value": "client_session", "label": "客户端会话"},
+  {"value": "client_agent_invalid", "label": "客户端 Agent 异常"},
+  {"value": "database_rebuilt", "label": "数据库重建"},
+  {"value": "system_start", "label": "服务启动"},
+  {"value": "system_stop", "label": "服务停止"},
+  {"value": "config_metadata_migrated", "label": "配置元数据迁移"},
+  {"value": "knock_grant_created", "label": "创建临时访问授权"},
+  {"value": "knock_grant_revoked", "label": "撤销临时访问授权"}
+]
