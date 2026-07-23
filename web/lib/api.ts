@@ -13,7 +13,7 @@ export async function api<T = void>(path: string, options: ApiOptions = {}): Pro
   const headers = new Headers(options.headers);
   if (options.body) headers.set("Content-Type", "application/json");
   if (options.csrf) headers.set("X-CSRF-Token", options.csrf);
-  const response = await fetch(`/backend${path}`, {
+  const response = await fetch(path, {
     ...options,
     headers,
     credentials: "include",
@@ -26,4 +26,3 @@ export async function api<T = void>(path: string, options: ApiOptions = {}): Pro
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
-

@@ -18,7 +18,7 @@ export async function downloadExport(
   filters: Record<string, unknown>,
   csrf: string,
 ): Promise<string> {
-  const response = await fetch(`/backend${endpoint}`, {
+  const response = await fetch(endpoint, {
     method: "POST",
     credentials: "include",
     cache: "no-store",

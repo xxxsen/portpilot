@@ -11,13 +11,13 @@ async function login(page: Page) {
 }
 
 async function session(page: Page) {
-  const response = await page.request.get("/backend/api/auth/me");
+  const response = await page.request.get("/api/auth/me");
   expect(response.ok()).toBeTruthy();
   return response.json() as Promise<{csrf_token: string}>;
 }
 
 async function currentConfig(page: Page) {
-  const response = await page.request.get("/backend/api/config");
+  const response = await page.request.get("/api/config");
   expect(response.ok()).toBeTruthy();
   return response.json() as Promise<{
     revision: number;
@@ -38,7 +38,7 @@ async function saveConfig(
   csrf: string,
   config: Awaited<ReturnType<typeof currentConfig>>,
 ) {
-  const response = await page.request.put("/backend/api/config", {
+  const response = await page.request.put("/api/config", {
     headers: {"X-CSRF-Token": csrf},
     data: {expected_revision: config.revision, config},
   });
@@ -86,7 +86,7 @@ test("client creation and token rotation are one-time, redacted, and audited", a
     expect(redacted.client_config.find((client) => client.client_id === clientId)?.client_token)
       .toBe("__REDACTED__");
     await expect.poll(async () => {
-      const response = await page.request.get("/backend/api/events?page=1&page_size=100");
+      const response = await page.request.get("/api/events?page=1&page_size=100");
       if (!response.ok()) return false;
       const payload = await response.json() as {items: Array<{event_type: string; client_id: string}>};
       return payload.items.some((event) => event.event_type === "client_token_rotated" && event.client_id === clientId);

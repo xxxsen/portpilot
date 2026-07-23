@@ -7,12 +7,11 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       {
-        source: "/backend/:path*",
-        destination: `${adminApi}/:path*`,
+        source: "/api/:path*",
+        destination: `${adminApi}/api/:path*`,
       },
     ];
   },
 };
 
 export default nextConfig;
-

@@ -15,10 +15,10 @@ required=(
   'proxy_set_header X-Forwarded-Proto https;'
   'proxy_request_buffering off;'
   'proxy_buffering off;'
-  'location = /backend {'
-  'return 308 /backend/;'
-  'location ^~ /backend/ {'
-  'proxy_pass http://127.0.0.1:5100/;'
+  'location = /api {'
+  'return 308 /api/;'
+  'location ^~ /api/ {'
+  'proxy_pass http://127.0.0.1:5100;'
 )
 
 for pattern in "${required[@]}"; do

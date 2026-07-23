@@ -44,13 +44,13 @@ async function logout(page: Page) {
 }
 
 async function session(page: Page) {
-  const response = await page.request.get("/backend/api/auth/me");
+  const response = await page.request.get("/api/auth/me");
   expect(response.ok()).toBeTruthy();
   return response.json() as Promise<{csrf_token: string}>;
 }
 
 async function currentConfig(page: Page) {
-  const response = await page.request.get("/backend/api/config");
+  const response = await page.request.get("/api/config");
   expect(response.ok()).toBeTruthy();
   return response.json() as Promise<{
     revision: number;
@@ -70,7 +70,7 @@ async function currentConfig(page: Page) {
 }
 
 async function putConfig(page: Page, csrf: string, expectedRevision: number, config: Awaited<ReturnType<typeof currentConfig>>) {
-  return page.request.put("/backend/api/config", {
+  return page.request.put("/api/config", {
     headers: {"X-CSRF-Token": csrf},
     data: {expected_revision: expectedRevision, config},
   });
@@ -132,7 +132,7 @@ test("authentication lifecycle and secret redaction", async ({page, context}) =>
   await page.locator("label").filter({hasText: "10 分钟"}).click();
   await page.getByRole("button", {name: "登录"}).click();
   await expect(page.getByRole("heading", {name: "总览"})).toBeVisible();
-  const meResponse = await page.request.get("/backend/api/auth/me");
+  const meResponse = await page.request.get("/api/auth/me");
   expect(meResponse.ok()).toBeTruthy();
   const me = await meResponse.json() as {
     authenticated_at: number;
@@ -216,7 +216,7 @@ test("live status and audit views expose the formal server state", async ({page}
   expect(chartAfterRefresh).not.toBeNull();
   expect(Math.abs(chartAfterRefresh!.height - chartBeforeRefresh!.height)).toBeLessThan(1);
   expect(Math.abs(chartAfterRefresh!.width - chartBeforeRefresh!.width)).toBeLessThan(1);
-  const analyticsResponse = await page.request.get("/backend/api/network/analytics/overview?range=24h");
+  const analyticsResponse = await page.request.get("/api/network/analytics/overview?range=24h");
   expect(analyticsResponse.ok()).toBeTruthy();
   const analytics = await analyticsResponse.json() as {
     connections: number;
@@ -296,7 +296,7 @@ test("live status and audit views expose the formal server state", async ({page}
   const downloaded = await download;
   expect(downloaded.suggestedFilename()).toMatch(/^portpilot-network_connections-.*\.zip$/);
   await expect(exportDialog).toBeHidden();
-  const networkResponse = await page.request.get("/backend/api/network/connections?scope=history&page=1&page_size=25");
+  const networkResponse = await page.request.get("/api/network/connections?scope=history&page=1&page_size=25");
   expect(networkResponse.ok()).toBeTruthy();
   const network = await networkResponse.json() as {
     items: Array<{proxy_id: string; protocol: string}>;

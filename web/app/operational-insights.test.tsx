@@ -34,7 +34,7 @@ describe("operational insight controls", () => {
     const filename = await downloadExport("/api/exports/audit-events", "json", {outcome: "success"}, "csrf-value");
 
     expect(filename).toBe("portpilot-audit_events-20260722T120000Z.zip");
-    expect(fetchMock).toHaveBeenCalledWith("/backend/api/exports/audit-events", expect.objectContaining({
+    expect(fetchMock).toHaveBeenCalledWith("/api/exports/audit-events", expect.objectContaining({
       method: "POST",
       headers: expect.objectContaining({"X-CSRF-Token": "csrf-value"}),
       body: JSON.stringify({format: "json", filters: {outcome: "success"}}),
