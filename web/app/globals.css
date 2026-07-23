@@ -108,6 +108,15 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .client-row p, .event-row p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 .event-row time { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .event-row > svg { color: var(--accent); }
+.rich-event-row { align-items: center; display: grid; grid-template-columns: 24px minmax(240px, 1.2fr) minmax(520px, 2.2fr) max-content; gap: 13px 18px; }
+.rich-event-row > svg { flex: none; }
+.event-main { min-width: 0; }
+.event-context { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-left: 1px solid var(--line); color: var(--text); font-size: 11px; }
+.event-context span { min-width: 0; display: grid; gap: 3px; padding: 2px 13px; border-right: 1px solid var(--line); overflow: hidden; }
+.event-context span:last-child { border-right: 0; }
+.event-context b { color: var(--text); font-size: 11px; font-weight: 650; }
+.event-context code, .event-context span { overflow-wrap: anywhere; }
+.event-context code { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-size: 11px; }
 .empty-state { height: 120px; display: grid; place-items: center; border: 1px solid var(--line); background: white; color: var(--muted); border-radius: 6px; font-size: 13px; }
 .switch { position: relative; width: 36px; height: 20px; display: inline-block; flex: none; }
 .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
@@ -440,6 +449,11 @@ details summary { cursor: pointer; font-size: 13px; font-weight: 650; }
   .select-action select { width: 140px; }
   .form-grid { grid-template-columns: 1fr; }
   .event-row time { display: none; }
+  .rich-event-row { grid-template-columns: 24px minmax(0, 1fr); align-items: flex-start; }
+  .rich-event-row .event-main, .rich-event-row .event-context { grid-column: 2; }
+  .event-context { grid-template-columns: repeat(2, minmax(0, 1fr)); border-left: 0; gap: 8px 0; }
+  .event-context span:nth-child(2n) { border-right: 0; }
+  .event-context span { padding-left: 0; }
   .login-form { padding: 25px 20px; }
   .client-row { align-items: flex-start; flex-wrap: wrap; }
   .client-row .client-main { flex-basis: calc(100% - 52px); }

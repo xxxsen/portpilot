@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "@/components/overview/overview-page";
-import type { ClientView } from "@/lib/types";
+import type { AuditEvent, ClientView } from "@/lib/types";
 
 afterEach(cleanup);
 
@@ -33,6 +33,25 @@ const client: ClientView = {
   },
 };
 
+const recentEvent: AuditEvent = {
+  id: "audit-1",
+  occurred_at: heartbeatAt,
+  category: "auth",
+  event_type: "admin_login",
+  outcome: "success",
+  actor_type: "admin",
+  actor_id: "operator",
+  source_addr: "203.0.113.8",
+  client_id: "",
+  proxy_id: "",
+  connection_id: "",
+  summary: "管理员登录成功",
+  reason_code: "",
+  reason: "",
+  details: {},
+  config_changes: [],
+};
+
 describe("OverviewPage", () => {
   it("shows the last heartbeat and opens the shared client detail drawer", () => {
     render(<OverviewPage summary={null} clients={[client]} events={[]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
@@ -52,5 +71,15 @@ describe("OverviewPage", () => {
     fireEvent.click(screen.getByRole("button", {name: "查看 branch-a 网络活动"}));
     expect(onNavigate).toHaveBeenCalledWith({view: "network", params: {client_id: "branch-a", network_view: "client"}});
     expect(screen.queryByRole("dialog", {name: "Branch A"})).not.toBeInTheDocument();
+  });
+
+  it("shows useful recent event context on the overview", () => {
+    render(<OverviewPage summary={null} clients={[client]} events={[recentEvent]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
+
+    expect(screen.getByText("管理员登录")).toBeInTheDocument();
+    expect(screen.getByText("管理员登录成功")).toBeInTheDocument();
+    expect(screen.getByText("203.0.113.8")).toBeInTheDocument();
+    expect(screen.getByText("operator")).toBeInTheDocument();
+    expect(screen.getByText("成功")).toBeInTheDocument();
   });
 });

@@ -11,3 +11,4 @@ web/test-results/
 *.db-shm
 *.db-wal
 web/*.tsbuildinfo
+/sample

@@ -75,11 +75,65 @@ export function OverviewPage({
       <section className="section-block">
         <div className="section-heading"><div><h2>最近事件</h2><p>管理与客户端生命周期审计摘要</p></div></div>
         <div className="event-list">
-          {events.map((event) => <div className="event-row" key={event.id}><Activity size={16} /><div className="grow"><strong>{event.event_type}</strong><p>{event.summary || event.reason_code}</p></div><time>{new Date(event.occurred_at).toLocaleString()}</time></div>)}
+          {events.map((event) => <div className="event-row rich-event-row" key={event.id}>
+            <Activity size={16} />
+            <div className="event-main">
+              <div className="row-title">
+                <strong>{eventLabel(event.event_type)}</strong>
+                <span className={`outcome outcome-${event.outcome}`}>{outcomeLabel(event.outcome)}</span>
+              </div>
+              <p>{event.summary || event.reason_code || "无摘要"}</p>
+            </div>
+            <div className="event-context">
+              <span><b>来源 IP</b><code>{event.source_addr || "-"}</code></span>
+              <span><b>操作者</b>{event.actor_id || event.actor_type || "-"}</span>
+              <span><b>对象</b>{eventObject(event)}</span>
+              <span><b>原因</b>{event.reason_code || "-"}</span>
+            </div>
+            <time>{new Date(event.occurred_at).toLocaleString()}</time>
+          </div>)}
           {!events.length && <div className="empty-state">暂无事件</div>}
         </div>
       </section>
       <ClientDetailDialog client={detail} onClose={() => setDetailClientID("")} />
     </>
   );
+}
+
+function eventLabel(value: string) {
+  const labels: Record<string, string> = {
+    admin_login: "管理员登录",
+    admin_logout: "管理员退出",
+    data_export: "数据导出",
+    config_update: "配置变更",
+    client_created: "创建客户端",
+    client_updated: "更新客户端",
+    client_token_rotated: "轮换密钥",
+    admin_client_disconnect: "断开客户端",
+    client_session: "客户端会话",
+    client_agent_invalid: "Agent 异常",
+    database_rebuilt: "数据库重建",
+    system_start: "服务启动",
+    system_stop: "服务停止",
+    config_metadata_migrated: "配置元数据迁移",
+  };
+  return labels[value] ?? value;
+}
+
+function outcomeLabel(value: string) {
+  const labels: Record<string, string> = {
+    success: "成功",
+    failure: "失败",
+    denied: "拒绝",
+    pending: "等待",
+    unknown: "未知",
+  };
+  return labels[value] ?? value;
+}
+
+function eventObject(event: AuditEvent) {
+  if (event.client_id) return event.proxy_id ? `${event.client_id} / ${event.proxy_id}` : event.client_id;
+  if (event.proxy_id) return event.proxy_id;
+  if (event.connection_id) return event.connection_id;
+  return "-";
 }

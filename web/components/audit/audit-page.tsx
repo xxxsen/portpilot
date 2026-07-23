@@ -109,7 +109,7 @@ export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized:
                 <td><time title={new Date(event.occurred_at).toISOString()}>{new Date(event.occurred_at).toLocaleString()}</time></td>
                 <td><strong>{event.event_type}</strong><small>{event.category}</small></td>
                 <td>{event.actor_id || event.actor_type}</td>
-                <td className="mono audit-source-ip">{event.actor_type === "admin" ? event.source_addr || "-" : "-"}</td>
+                <td className="mono audit-source-ip">{event.source_addr || "-"}</td>
                 <td>{event.client_id || event.proxy_id || event.connection_id || "-"}</td>
                 <td><Outcome value={event.outcome} /></td>
                 <td>{event.summary || event.reason_code}</td>
