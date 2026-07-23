@@ -47,6 +47,7 @@ export function ProxyRuntimeDetail({
         <dl className="detail-grid">
           <dt>允许来源</dt><dd className="mono">{policyValue(proxy?.data.access_policy?.allow_cidrs, "全部")}</dd>
           <dt>拒绝来源</dt><dd className="mono">{policyValue(proxy?.data.access_policy?.deny_cidrs, "无")}</dd>
+          <dt>邮件临时授权</dt><dd>{proxy?.data.allow_knock_only ? "必须获得授权" : "不要求授权"}</dd>
           <dt>PROXY Protocol</dt><dd>{proxy?.data.enable_proxy_protocol ? "v1 已启用" : "关闭"}</dd>
           <dt>上行 / 下行限速</dt><dd>{rateLimitValue(proxy?.data.rate_limit)}</dd>
         </dl>

@@ -9,10 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
+	stdmail "net/mail"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -38,13 +44,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "smoke failed:", err)
 		os.Exit(1)
 	}
-	fmt.Println("PortPilot smoke passed: API, Web, source policy, TCP smux/direct, PROXY v1, rate limit, and UDP-over-TCP")
+	fmt.Println("PortPilot smoke passed: API, Web, ACL, email knock, TCP smux/direct, PROXY v1, rate limit, and UDP-over-TCP")
 }
 
 func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	adminURL := env("PORTPILOT_DEV_ADMIN_URL", "http://127.0.0.1:5100")
+	if os.Getenv("PORTPILOT_KNOCK_RESTART_CHECK") == "1" {
+		return smokeKnockRestart(ctx, adminURL)
+	}
 	started := time.Now().Add(-time.Second)
 	webURL := env("PORTPILOT_DEV_WEB_URL", "http://127.0.0.1:3000")
 	if err := smokeHTTP(ctx, adminURL, webURL); err != nil {
@@ -71,7 +80,280 @@ func run() error {
 	if err := smokeUDP("127.0.0.1:7001"); err != nil {
 		return err
 	}
+	if err := smokeKnock(ctx, adminURL, env("PORTPILOT_DEV_SMTP_URL", "http://127.0.0.1:18083")); err != nil {
+		return fmt.Errorf("email knock smoke: %w", err)
+	}
 	return smokeObservability(ctx, adminURL, started)
+}
+
+func smokeKnock(ctx context.Context, adminURL, smtpURL string) error {
+	adminClient, csrf, err := smokeAdminSession(ctx, adminURL)
+	if err != nil {
+		return err
+	}
+	for _, sourceIP := range []string{"127.0.0.6", "127.0.0.8", "127.0.0.9"} {
+		if err := revokeKnockGrant(ctx, adminClient, adminURL, csrf, sourceIP); err != nil {
+			return err
+		}
+	}
+	if err := clearMailbox(ctx, smtpURL); err != nil {
+		return err
+	}
+	if err := smokeTCPDenied(ctx, "127.0.0.1:7005", "127.0.0.6"); err != nil {
+		return fmt.Errorf("ungranted TCP source was not denied: %w", err)
+	}
+	if err := smokeUDPDenied("127.0.0.1:7006", "127.0.0.6"); err != nil {
+		return fmt.Errorf("ungranted UDP source was not denied: %w", err)
+	}
+
+	token, err := requestKnockToken(ctx, adminURL, smtpURL, "allowed-a@example.com", "127.0.0.6")
+	if err != nil {
+		return err
+	}
+	if status, verifyErr := verifyKnockToken(ctx, adminURL, token, "127.0.0.7"); verifyErr != nil || status != http.StatusForbidden {
+		return unexpectedHTTPStatus("scanner mismatch", status, http.StatusForbidden, verifyErr)
+	}
+	if status, verifyErr := verifyKnockToken(ctx, adminURL, token, "127.0.0.6"); verifyErr != nil || status != http.StatusOK {
+		return unexpectedHTTPStatus("matching verification", status, http.StatusOK, verifyErr)
+	}
+	if err := smokeTCP(ctx, "127.0.0.1:7005", "127.0.0.6", 1024); err != nil {
+		return fmt.Errorf("granted TCP source: %w", err)
+	}
+	if err := smokeUDPFrom("127.0.0.1:7006", "127.0.0.6"); err != nil {
+		return fmt.Errorf("granted UDP source: %w", err)
+	}
+
+	aclToken, err := requestKnockToken(ctx, adminURL, smtpURL, "allowed-b@example.com", "127.0.0.9")
+	if err != nil {
+		return err
+	}
+	if status, verifyErr := verifyKnockToken(ctx, adminURL, aclToken, "127.0.0.9"); verifyErr != nil || status != http.StatusOK {
+		return unexpectedHTTPStatus("ACL test verification", status, http.StatusOK, verifyErr)
+	}
+	if err := smokeTCPDenied(ctx, "127.0.0.1:7005", "127.0.0.9"); err != nil {
+		return fmt.Errorf("grant bypassed proxy ACL: %w", err)
+	}
+
+	if err := revokeKnockGrant(ctx, adminClient, adminURL, csrf, "127.0.0.6"); err != nil {
+		return err
+	}
+	if err := smokeTCPDenied(ctx, "127.0.0.1:7005", "127.0.0.6"); err != nil {
+		return fmt.Errorf("revoked TCP source was not denied: %w", err)
+	}
+	if err := smokeUDPDenied("127.0.0.1:7006", "127.0.0.6"); err != nil {
+		return fmt.Errorf("revoked UDP source was not denied: %w", err)
+	}
+
+	restartToken, err := requestKnockToken(ctx, adminURL, smtpURL, "allowed-c@example.com", "127.0.0.8")
+	if err != nil {
+		return err
+	}
+	if status, verifyErr := verifyKnockToken(ctx, adminURL, restartToken, "127.0.0.8"); verifyErr != nil || status != http.StatusOK {
+		return unexpectedHTTPStatus("restart test verification", status, http.StatusOK, verifyErr)
+	}
+	return smokeTCP(ctx, "127.0.0.1:7005", "127.0.0.8", 256)
+}
+
+func unexpectedHTTPStatus(label string, actual, expected int, err error) error {
+	if err != nil {
+		return fmt.Errorf("%s: status=%d, expected=%d: %w", label, actual, expected, err)
+	}
+	return fmt.Errorf("%s: status=%d, expected=%d", label, actual, expected)
+}
+
+func smokeKnockRestart(ctx context.Context, adminURL string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, adminURL+"/api/knock/status", nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("X-Real-IP", "127.0.0.8")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	var status struct {
+		Authorized bool `json:"authorized"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		return err
+	}
+	if status.Authorized {
+		return errors.New("knock grant survived server restart")
+	}
+	if err := smokeTCPDenied(ctx, "127.0.0.1:7005", "127.0.0.8"); err != nil {
+		return fmt.Errorf("protected TCP accepted after restart: %w", err)
+	}
+	return smokeUDPDenied("127.0.0.1:7006", "127.0.0.8")
+}
+
+func smokeAdminSession(ctx context.Context, adminURL string) (*http.Client, string, error) {
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: 5 * time.Second, Jar: jar}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, adminURL+"/api/auth/login",
+		strings.NewReader(`{"user_name":"admin","password":"admin"}`),
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = response.Body.Close() }()
+	var login struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&login) != nil || login.CSRF == "" {
+		return nil, "", fmt.Errorf("admin login for knock returned %s", response.Status)
+	}
+	return client, login.CSRF, nil
+}
+
+func revokeKnockGrant(
+	ctx context.Context,
+	client *http.Client,
+	adminURL, csrf, sourceIP string,
+) error {
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodDelete, adminURL+"/api/knock/grants/"+sourceIP, nil,
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("X-CSRF-Token", csrf)
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("revoke %s returned %s", sourceIP, response.Status)
+	}
+	return nil
+}
+
+func clearMailbox(ctx context.Context, smtpURL string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, smtpURL+"/messages", nil)
+	if err != nil {
+		return err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("clear SMTP mailbox returned %s", response.Status)
+	}
+	return nil
+}
+
+func requestKnockToken(
+	ctx context.Context,
+	adminURL, smtpURL, email, sourceIP string,
+) (string, error) {
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, adminURL+"/api/knock/requests",
+		strings.NewReader(`{"email":"`+email+`"}`),
+	)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Real-IP", sourceIP)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		return "", fmt.Errorf("knock request for %s returned %s", email, response.Status)
+	}
+	for attempt := 0; attempt < 100; attempt++ {
+		mailRequest, requestErr := http.NewRequestWithContext(
+			ctx, http.MethodGet, smtpURL+"/messages?to="+email, nil,
+		)
+		if requestErr != nil {
+			return "", requestErr
+		}
+		mailResponse, requestErr := http.DefaultClient.Do(mailRequest)
+		if requestErr != nil {
+			return "", requestErr
+		}
+		var mailbox struct {
+			Items []struct {
+				Data string `json:"data"`
+			} `json:"items"`
+		}
+		decodeErr := json.NewDecoder(mailResponse.Body).Decode(&mailbox)
+		_ = mailResponse.Body.Close()
+		if decodeErr != nil {
+			return "", decodeErr
+		}
+		if len(mailbox.Items) > 0 {
+			if token, extractErr := tokenFromMessage(mailbox.Items[len(mailbox.Items)-1].Data); extractErr == nil {
+				return token, nil
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return "", fmt.Errorf("SMTP fixture did not capture token for %s", email)
+}
+
+func tokenFromMessage(data string) (string, error) {
+	message, err := stdmail.ReadMessage(strings.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	mediaType, parameters, err := mime.ParseMediaType(message.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/alternative" {
+		return "", errors.New("knock email is not multipart/alternative")
+	}
+	parts := multipart.NewReader(message.Body, parameters["boundary"])
+	pattern := regexp.MustCompile(`#token=([A-Za-z0-9_-]{43})`)
+	for {
+		part, nextErr := parts.NextPart()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			return "", nextErr
+		}
+		var reader io.Reader = part
+		if strings.EqualFold(part.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
+			reader = quotedprintable.NewReader(part)
+		}
+		body, readErr := io.ReadAll(reader)
+		_ = part.Close()
+		if readErr != nil {
+			return "", readErr
+		}
+		if match := pattern.FindSubmatch(body); len(match) == 2 {
+			return string(match[1]), nil
+		}
+	}
+	return "", errors.New("knock token is missing from email")
+}
+
+func verifyKnockToken(ctx context.Context, adminURL, token, sourceIP string) (int, error) {
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, adminURL+"/api/knock/verify",
+		strings.NewReader(`{"token":"`+token+`"}`),
+	)
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Real-IP", sourceIP)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	return response.StatusCode, nil
 }
 
 func smokeHTTP(ctx context.Context, adminURL, webURL string) error {
@@ -248,6 +530,52 @@ func smokeUDP(address string) error {
 		if !bytes.Equal(buffer[:n], payload) {
 			return fmt.Errorf("UDP payload mismatch for source %d", source)
 		}
+	}
+	return nil
+}
+
+func smokeUDPFrom(address, sourceIP string) error {
+	target, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(sourceIP)})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	payload := []byte(fmt.Sprintf("portpilot-knock-udp-%d", time.Now().UnixNano()))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := conn.WriteToUDP(payload, target); err != nil {
+		return err
+	}
+	buffer := make([]byte, 65507)
+	n, _, err := conn.ReadFromUDP(buffer)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(buffer[:n], payload) {
+		return errors.New("protected UDP payload mismatch")
+	}
+	return nil
+}
+
+func smokeUDPDenied(address, sourceIP string) error {
+	target, err := net.ResolveUDPAddr("udp", address)
+	if err != nil {
+		return err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(sourceIP)})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := conn.WriteToUDP([]byte("must-not-reach-target"), target); err != nil {
+		return err
+	}
+	if _, _, err := conn.ReadFromUDP(make([]byte, 64)); err == nil {
+		return errors.New("denied UDP source received target data")
 	}
 	return nil
 }

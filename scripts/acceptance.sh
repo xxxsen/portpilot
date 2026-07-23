@@ -23,29 +23,44 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-setsid make -C "${ROOT}" dev >"${LOG}" 2>&1 &
-DEV_PID=$!
-ready=0
-deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
-while ((SECONDS < deadline)); do
-  if curl -fsS http://127.0.0.1:3000 >/dev/null 2>&1 && grep -q "PortPilot dev environment is ready" "${LOG}"; then
-    ready=1
-    break
-  fi
-  if ! kill -0 "${DEV_PID}" 2>/dev/null; then
+start_dev() {
+  : >"${LOG}"
+  setsid make -C "${ROOT}" dev >"${LOG}" 2>&1 &
+  DEV_PID=$!
+  local ready=0
+  local deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+  while ((SECONDS < deadline)); do
+    if curl -fsS http://127.0.0.1:3000 >/dev/null 2>&1 && grep -q "PortPilot dev environment is ready" "${LOG}"; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "${DEV_PID}" 2>/dev/null; then
+      cat "${LOG}" >&2
+      exit 1
+    fi
+    sleep 0.25
+  done
+  if [[ "${ready}" -ne 1 ]]; then
+    echo "make dev did not become ready within ${READY_TIMEOUT_SECONDS}s" >&2
     cat "${LOG}" >&2
     exit 1
   fi
-  sleep 0.25
-done
-if [[ "${ready}" -ne 1 ]]; then
-  echo "make dev did not become ready within ${READY_TIMEOUT_SECONDS}s" >&2
-  cat "${LOG}" >&2
-  exit 1
-fi
+}
 
+stop_dev() {
+  if [[ -n "${DEV_PID:-}" ]] && kill -0 "${DEV_PID}" 2>/dev/null; then
+    kill -TERM -- "-${DEV_PID}" 2>/dev/null || kill -TERM "${DEV_PID}" 2>/dev/null || true
+    wait "${DEV_PID}" 2>/dev/null || true
+  fi
+  DEV_PID=""
+}
+
+start_dev
 "${ROOT}/scripts/snapshot-dev.sh" start
 make -C "${ROOT}" smoke-dev
+stop_dev
+start_dev
+PORTPILOT_KNOCK_RESTART_CHECK=1 make -C "${ROOT}" smoke-dev
 make -C "${ROOT}" web-e2e
 make -C "${ROOT}" fault-test
 make -C "${ROOT}" soak-test

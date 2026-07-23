@@ -10,8 +10,9 @@ SQLite migration 和 CLI 的详细契约见
 Top K、GeoIP 和 IP 下钻见
 [`003-network-history-analytics.md`](003-network-history-analytics.md)，运行可见性、搜索、周期对比、
 导出和 cache 生命周期见
-[`004-operational-insights-and-navigation.md`](004-operational-insights-and-navigation.md)。具体默认参数以配置
-校验器和仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
+[`004-operational-insights-and-navigation.md`](004-operational-insights-and-navigation.md)，邮件 Magic Link
+敲门授权见 [`005-email-magic-link-knock.md`](005-email-magic-link-knock.md)。具体默认参数以配置校验器和
+仓库配置示例为准；工程门禁以 `Makefile` 和 `AGENTS.md` 为准。
 
 核心边界：
 
@@ -119,6 +120,7 @@ PortPilot 使用三类配置：
 | `data_plane` | transport、smux pool 和 UDP 参数 |
 | `timeouts` | 握手、心跳、建链、空闲和最长生命周期 |
 | `limits` | pending、tunnel、session、flow、消息和速率上限 |
+| `knock_config` | 可选的邮件 Magic Link 临时来源 IP 授权和 SMTP |
 | `log_config` | 服务端日志级别、console/file 输出和文件轮转参数 |
 
 `data_plane.smux` 由服务端权威配置，并在客户端鉴权成功后下发。客户端不能通过本地配置放宽 stream、buffer、keepalive、drain 或 session 上限。
@@ -198,6 +200,7 @@ PortPilot 使用三类配置：
 - `rate_limit` 按每条 TCP 连接或每个 UDP flow 分别限制上行与下行 payload bytes/s，零值
   表示不限速。
 - `enable_proxy_protocol` 缺省关闭，只允许 TCP；启用后目标必须接受 PROXY Protocol v1。
+- `allow_knock_only` 缺省关闭；启用后外部来源还必须具有有效的邮件临时授权。
 
 配置查询 API 只能返回脱敏 token。token 轮换时，新 token 只展示一次；配置文件仍属于敏感文件。
 

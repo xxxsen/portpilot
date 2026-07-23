@@ -218,7 +218,7 @@ func (a *App) commitConfigMutation(
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit_store_unavailable"})
 		return config.ClientFile{}, false
 	}
-	updated, err := a.ConfigManager.Replace(expectedRevision, next, a.Listeners.Prepare)
+	updated, err := a.ConfigManager.Replace(expectedRevision, next, a.prepareClientConfig)
 	if err != nil {
 		if auditErr := a.finishConfigAudit(r.Context(), event.ID, "failure", current.Revision, err, nil); auditErr != nil {
 			a.storeError.Store(true)

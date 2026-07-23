@@ -4,6 +4,7 @@ export type TunnelData = {
   bind: string;
   connect: string;
   enable_proxy_protocol?: boolean;
+  allow_knock_only?: boolean;
   access_policy?: {
     allow_cidrs: string[];
     deny_cidrs: string[];
@@ -406,6 +407,28 @@ export type ProxyRuntime = {
 export type ProxyRuntimePage = Page<ProxyRuntime> & {
   revision: number;
   snapshot_at: number;
+};
+
+export type KnockStatus = {
+  enabled: boolean;
+  source_ip: string;
+  authorized: boolean;
+  granted_at: number;
+  expires_at: number;
+  remaining_seconds: number;
+};
+
+export type KnockGrant = {
+  source_ip: string;
+  granted_by: string;
+  granted_at: number;
+  expires_at: number;
+  remaining_seconds: number;
+};
+
+export type KnockGrantPage = {
+  items: KnockGrant[];
+  total: number;
 };
 
 export type NavigationDestination = {

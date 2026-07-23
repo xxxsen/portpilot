@@ -84,6 +84,7 @@ var (
 		"client_agent_invalid": {}, "database_rebuilt": {},
 		"system_start": {}, "system_stop": {},
 		"config_metadata_migrated": {},
+		"knock_grant_created":      {}, "knock_grant_revoked": {},
 	}
 )
 

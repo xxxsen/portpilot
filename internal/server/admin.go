@@ -19,6 +19,8 @@ import (
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/geoip"
+	"github.com/portpilot/portpilot/internal/knock"
+	"github.com/portpilot/portpilot/internal/mailer"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
 	"go.uber.org/zap"
@@ -79,6 +81,11 @@ func (a *App) adminMux() http.Handler {
 		writeJSON(w, http.StatusOK, a.healthStatus(r.Context(), status))
 	})
 	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
+	mux.HandleFunc("GET /api/knock/status", a.handleKnockStatus)
+	mux.HandleFunc("POST /api/knock/requests", a.handleKnockRequest)
+	mux.HandleFunc("POST /api/knock/verify", a.handleKnockVerify)
+	mux.HandleFunc("GET /api/knock/grants", a.requireAdmin(a.handleKnockGrants))
+	mux.HandleFunc("DELETE /api/knock/grants/{source_ip}", a.requireAdmin(a.requireCSRF(a.handleKnockRevoke)))
 	mux.HandleFunc("POST /api/auth/logout", a.requireAdmin(a.requireCSRF(a.handleLogout)))
 	mux.HandleFunc("GET /api/auth/me", a.requireAdmin(a.handleMe))
 	mux.HandleFunc("GET /api/clients", a.requireAdmin(a.handleClients))
@@ -174,11 +181,24 @@ func (a *App) healthStatus(ctx context.Context, status string) map[string]any {
 			"last_error_code": value.LastErrorCode,
 		}
 	}
+	knockMailerStatus := "disabled"
+	if a.Config.Knock.Enabled {
+		knockMailerStatus = "ok"
+		if a.KnockMailer == nil {
+			knockMailerStatus = "degraded"
+		} else {
+			stats := a.KnockMailer.Stats()
+			if stats.LastErrorAt > stats.LastSuccessAt {
+				knockMailerStatus = "degraded"
+			}
+		}
+	}
 	return map[string]any{
 		"status": status, "database": database,
 		"audit_writer": auditWriter, "activity_writer": activityWriter,
 		"network_analytics": analytics,
 		"geoip":             geoStatus,
+		"knock_mailer":      knockMailerStatus,
 		"migration_version": migrationVersion,
 	}
 }
@@ -504,6 +524,14 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 	if a.GeoIP != nil {
 		geoIPMetrics = a.GeoIP.Metrics()
 	}
+	knockStats := knock.Stats{}
+	if a.Knock != nil {
+		knockStats = a.Knock.Stats()
+	}
+	mailStats := mailer.WorkerStats{}
+	if a.KnockMailer != nil {
+		mailStats = a.KnockMailer.Stats()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"online_clients":  len(a.Sessions.Snapshot()),
 		"pending_tunnels": pending, "active_tunnels": active,
@@ -522,6 +550,19 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 		"external_access_metrics":           a.access.snapshot(),
 		"geoip_metrics":                     geoIPMetrics,
 		"export_metrics":                    a.exportManager().metrics.snapshot(),
+		"active_knock_tokens":               knockStats.ActiveTokens,
+		"active_knock_grants":               knockStats.ActiveGrants,
+		"knock_request_rate_limited_total":  knockStats.RequestRateLimited,
+		"knock_verify_success_total":        knockStats.VerifySuccess,
+		"knock_verify_failure_total":        knockStats.VerifyFailure,
+		"knock_source_mismatch_total":       knockStats.SourceMismatch,
+		"knock_grant_revoked_total":         knockStats.GrantRevoked,
+		"knock_mail_queue_depth":            mailStats.QueueDepth,
+		"knock_mail_queued_total":           mailStats.QueuedTotal,
+		"knock_mail_sent_total":             mailStats.SentTotal,
+		"knock_mail_failed_total":           mailStats.FailedTotal,
+		"knock_mail_last_success_at":        mailStats.LastSuccessAt,
+		"knock_mail_last_error_at":          mailStats.LastErrorAt,
 		"degraded":                          a.Degraded(),
 	})
 }

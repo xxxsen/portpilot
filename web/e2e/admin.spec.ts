@@ -180,7 +180,7 @@ test("live status and audit views expose the formal server state", async ({page}
 
   await navigate(page, "客户端");
   const client = page.locator(".client-row").filter({hasText: "dev-client"});
-  await expect(client).toContainText("5 条代理");
+  await expect(client).toContainText("7 条代理");
   await client.getByRole("button", {name: "查看 dev-client 详情"}).click();
   const clientDetail = page.getByRole("dialog", {name: "本地开发客户端"});
   await expect(clientDetail.getByRole("heading", {name: "Agent 环境"})).toBeVisible();
@@ -344,7 +344,8 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await editor.getByLabel("内网目标").fill("127.0.0.1:18080");
     await editor.getByLabel("允许来源 CIDR").fill("127.0.0.0/8");
     await editor.getByLabel("拒绝来源 CIDR").fill("127.0.0.9/32");
-    await editor.locator(".toggle-setting .switch").click();
+    const proxyProtocolSetting = editor.locator("label.toggle-setting", {hasText: "启用 PROXY Protocol v1"});
+    await proxyProtocolSetting.locator(".switch").click();
     await expect(editor.getByLabel("启用 PROXY Protocol v1")).toBeChecked();
     const rateEditors = editor.locator(".rate-editor");
     await rateEditors.nth(0).getByRole("checkbox", {name: "不限速"}).uncheck();
@@ -366,7 +367,7 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await page.locator("#proxy-client").selectOption("dev-client");
     await page.getByRole("button", {name: "新增代理"}).click();
     const protocolSwitch = page.getByLabel("启用 PROXY Protocol v1");
-    await page.getByRole("dialog", {name: "新增代理"}).locator(".toggle-setting .switch").click();
+    await page.locator("label.toggle-setting", {hasText: "启用 PROXY Protocol v1"}).locator(".switch").click();
     await expect(protocolSwitch).toBeChecked();
     await page.getByLabel("网络").selectOption("udp");
     await expect(protocolSwitch).toBeDisabled();

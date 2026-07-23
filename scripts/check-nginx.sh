@@ -17,6 +17,12 @@ required=(
   'proxy_buffering off;'
   'location = /api {'
   'return 308 /api/;'
+  'limit_req_zone $binary_remote_addr zone=portpilot_knock_mail:10m rate=5r/m;'
+  'limit_req_zone $binary_remote_addr zone=portpilot_knock_verify:10m rate=30r/m;'
+  'location = /api/knock/requests {'
+  'limit_req zone=portpilot_knock_mail burst=5 nodelay;'
+  'location = /api/knock/verify {'
+  'limit_req zone=portpilot_knock_verify burst=10 nodelay;'
   'location ^~ /api/ {'
   'proxy_pass http://127.0.0.1:5100;'
 )

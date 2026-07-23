@@ -16,6 +16,8 @@ import (
 	cachelayout "github.com/portpilot/portpilot/internal/cache"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/geoip"
+	"github.com/portpilot/portpilot/internal/knock"
+	"github.com/portpilot/portpilot/internal/mailer"
 	"github.com/portpilot/portpilot/internal/store"
 	"github.com/portpilot/portpilot/internal/version"
 	"github.com/xxxsen/common/logutil"
@@ -42,6 +44,8 @@ type App struct {
 	DataLimiter       *auth.RateLimiter
 	RuntimeLogLimiter *auth.RateLimiter
 	GlobalAccess      accesspolicy.Policy
+	Knock             *knock.Manager
+	KnockMailer       *mailer.Worker
 	Logger            *zap.Logger
 
 	adminServer *http.Server
@@ -81,6 +85,40 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load client proxy configuration: %w", err)
 	}
+	if err := config.ValidateKnockProxyCombination(cfg.Knock.Enabled, configManager.Snapshot()); err != nil {
+		return nil, fmt.Errorf("validate knock proxy configuration: %w", err)
+	}
+	var knockManager *knock.Manager
+	var knockMailer *mailer.Worker
+	if cfg.Knock.Enabled {
+		sender, senderErr := mailer.NewSMTPSender(cfg.Knock.SMTP)
+		if senderErr != nil {
+			return nil, fmt.Errorf("initialize knock mailer: %w", senderErr)
+		}
+		knockManager = knock.New(knock.Config{
+			MagicLinkTTL:       cfg.Duration(cfg.Knock.MagicLinkTTL),
+			GrantTTL:           cfg.Duration(cfg.Knock.GrantTTL),
+			ResendInterval:     cfg.Duration(cfg.Knock.ResendInterval),
+			AllowedEmails:      cfg.Knock.AllowedEmails,
+			MaxRequestsPerHour: cfg.Limits.MaxKnockRequestsPerHour,
+			MaxPendingTokens:   cfg.Limits.MaxKnockPendingTokens,
+			MaxGrants:          cfg.Limits.MaxKnockGrants,
+		})
+		knockMailer = mailer.NewWorker(sender, cfg.Limits.MaxKnockMailQueue)
+	}
+	keepKnock := false
+	defer func() {
+		if !keepKnock {
+			if knockMailer != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = knockMailer.Close(ctx)
+				cancel()
+			}
+			if knockManager != nil {
+				knockManager.Close()
+			}
+		}
+	}()
 	cacheRoot, err := cachelayout.Open(cfg.CacheDir)
 	if err != nil {
 		return nil, fmt.Errorf("initialize cache directory: %w", err)
@@ -101,6 +139,8 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 		DataLimiter:       auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
 		RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
 		GlobalAccess:      accesspolicy.Compile(cfg.AccessPolicy),
+		Knock:             knockManager,
+		KnockMailer:       knockMailer,
 	}
 	app.Sessions = NewSessionManager(app)
 	app.Tunnels = NewTunnelManager(app)
@@ -216,6 +256,7 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	}
 	app.startAgentWriter()
 	keepCache = true
+	keepKnock = true
 	return app, nil
 }
 
@@ -250,6 +291,12 @@ func (a *App) Close(parent context.Context) error {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 10*time.Second)
 		defer cancel()
 		a.Sessions.CloseAll()
+		if a.KnockMailer != nil {
+			result = errors.Join(result, a.KnockMailer.Close(ctx))
+		}
+		if a.Knock != nil {
+			a.Knock.Close()
+		}
 		if a.exports != nil {
 			result = errors.Join(result, a.exports.close(ctx))
 		}
@@ -274,6 +321,13 @@ func (a *App) Close(parent context.Context) error {
 
 func (a *App) Ready() bool {
 	return a.ready.Load()
+}
+
+func (a *App) prepareClientConfig(file config.ClientFile) (func(), func(), error) {
+	if err := config.ValidateKnockProxyCombination(a.Config.Knock.Enabled, file); err != nil {
+		return nil, nil, fmt.Errorf("validate knock proxy configuration: %w", err)
+	}
+	return a.Listeners.Prepare(file)
 }
 
 func (a *App) Degraded() bool {

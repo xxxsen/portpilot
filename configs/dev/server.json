@@ -6,6 +6,28 @@
     "allow_cidrs": [],
     "deny_cidrs": []
   },
+  "knock_config": {
+    "enabled": true,
+    "public_base_url": "https://127.0.0.1:3000",
+    "magic_link_ttl": "10m",
+    "grant_ttl": "10m",
+    "resend_interval": "30s",
+    "allowed_emails": [
+      "allowed-a@example.com",
+      "allowed-b@example.com",
+      "allowed-c@example.com",
+      "e2e@example.com"
+    ],
+    "smtp": {
+      "host": "127.0.0.1",
+      "port": 1465,
+      "security": "starttls",
+      "user_name": "portpilot",
+      "password": "portpilot-dev-password",
+      "from": "PortPilot Dev <portpilot@example.com>",
+      "tls_ca_file": "../../.dev-data/smtp/ca.pem"
+    }
+  },
   "users": [
     {
       "user_name": "admin",
@@ -59,7 +81,11 @@
     "max_data_handshakes_per_minute": 60000,
     "max_admin_login_attempts_per_minute": 100,
     "max_mux_sessions_total": 4096,
-    "max_udp_flows_total": 65536
+    "max_udp_flows_total": 65536,
+    "max_knock_requests_per_hour": 100,
+    "max_knock_pending_tokens": 1024,
+    "max_knock_grants": 4096,
+    "max_knock_mail_queue": 128
   },
   "observability": {
     "audit_retention": "4320h",

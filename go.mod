@@ -7,6 +7,7 @@ require (
 	github.com/maxmind/mmdbwriter v1.2.0
 	github.com/oschwald/maxminddb-golang/v2 v2.4.1
 	github.com/spf13/cobra v1.10.2
+	github.com/wneessen/go-mail v0.8.1
 	github.com/xtaci/smux v1.5.57
 	github.com/xxxsen/common v0.1.30
 	go.uber.org/zap v1.23.0
@@ -28,6 +29,7 @@ require (
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
+	golang.org/x/text v0.40.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	modernc.org/libc v1.74.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

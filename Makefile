@@ -72,7 +72,7 @@ doctor: ## Check development tools and local ports
 	@"$(PROJECT_ROOT)/bin/golangci-lint" version
 	@"$(PROJECT_ROOT)/bin/shellcheck" --version | grep -F "version: 0.11.0"
 	@"$(PROJECT_ROOT)/bin/hadolint" --version
-	@for port in 3000 5100 6100 7000 7001 7002 7003 7004 18080 18081 18082; do \
+	@for port in 1465 3000 5100 6100 7000 7001 7002 7003 7004 7005 7006 18080 18081 18082 18083; do \
 		if ss -H -ltnu 2>/dev/null | awk '{print $$5}' | grep -Eq ":$${port}$$"; then \
 			echo "Port $${port} is already in use" >&2; exit 1; \
 		fi; \
@@ -171,7 +171,7 @@ web-check: web-lint web-typecheck web-test web-build ## Run all Web gates
 web-e2e: web-install ## Run Playwright against an active make dev environment
 	npm --prefix "$(PROJECT_ROOT)/web" run test:e2e
 
-dev: web-install ## Start the real server, client, Web, and echo fixture
+dev: web-install ## Start the real server, client, Web, echo, and SMTP fixtures
 	"$(PROJECT_ROOT)/scripts/dev.sh"
 
 smoke-dev: ## Verify an active make dev environment

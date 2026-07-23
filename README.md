@@ -13,7 +13,8 @@ PortPilot 是一个由服务端集中管理代理规则的内网反向代理工�
 
 完整协议、安全和生命周期见 [docs/001-portpilot-design.md](docs/001-portpilot-design.md)；
 管理后台、审计、网络活动、SQLite migration 和 CLI 见
-[docs/002-admin-console-and-cli-improvements.md](docs/002-admin-console-and-cli-improvements.md)。
+[docs/002-admin-console-and-cli-improvements.md](docs/002-admin-console-and-cli-improvements.md)；邮件
+Magic Link 敲门授权见 [docs/005-email-magic-link-knock.md](docs/005-email-magic-link-knock.md)。
 
 ## 本地开发
 
@@ -25,7 +26,9 @@ make doctor
 make dev
 ```
 
-`make dev` 构建并启动正式的 `cmd/portpilot-server` 和 `cmd/portpilot-client`，同时启动 Next.js 和仅作为代理目标的 TCP/UDP echo fixture。客户端通过 `configs/dev/client.json` 以非 TLS 方式直连本地服务端。
+`make dev` 构建并启动正式的 `cmd/portpilot-server` 和 `cmd/portpilot-client`，同时启动 Next.js
+以及外部 TCP/UDP echo 和 SMTP capture fixture。客户端通过 `configs/dev/client.json` 以非 TLS
+方式直连本地服务端；fixture 不实现任何 PortPilot 服务端或客户端行为。
 
 Makefile 和开发测试脚本优先使用 `.tools/go`，忽略外部 `GOROOT`，并按 `GOVERSION` 将编译
 缓存隔离在 `.cache/go-build/`；仓库工具链不存在时才回退到系统 Go。
@@ -40,6 +43,9 @@ Makefile 和开发测试脚本优先使用 `.tools/go`，忽略外部 `GOROOT`�
 - TCP direct：`127.0.0.1:7002`
 - TCP PROXY Protocol v1：`127.0.0.1:7003`
 - TCP 连接限速：`127.0.0.1:7004`
+- 邮件授权 TCP：`127.0.0.1:7005`
+- 邮件授权 UDP：`127.0.0.1:7006`
+- 开发 SMTP capture API：`http://127.0.0.1:18083`
 
 开发管理员账号为 `admin` / `admin`，只允许用于本地配置。
 
@@ -52,7 +58,8 @@ Makefile 和开发测试脚本优先使用 `.tools/go`，忽略外部 `GOROOT`�
 
 所有 JSON 使用严格解析，未知字段会导致启动失败。管理员密码必须是 bcrypt 哈希且 cost
 不低于 10；客户端 token 应由至少 32 字节随机数据生成。生产配置应限制为服务账号可读，
-按需配置动态代理端口的全局/代理外部来源 CIDR、每连接限速和 TCP PROXY Protocol v1。
+按需配置动态代理端口的全局/代理外部来源 CIDR、邮件临时授权、每连接限速和 TCP PROXY
+Protocol v1。
 
 服务端和客户端都支持相同的 `log_config`。省略时默认以 `debug` 级别输出到 console；生产
 环境可配置 `level`、`console`、`file`、`file_size`、`file_count` 和 `keep_days`。文件相对

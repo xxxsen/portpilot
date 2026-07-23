@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/mail"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -35,6 +36,7 @@ type ServerConfig struct {
 	DataPlane        DataPlaneConfig        `json:"data_plane"`
 	Timeouts         TimeoutConfig          `json:"timeouts"`
 	Limits           LimitConfig            `json:"limits"`
+	Knock            KnockConfig            `json:"knock_config"`
 	Observability    ObservabilityConfig    `json:"observability"`
 	LogConfig        commonlogger.LogConfig `json:"log_config"`
 }
@@ -92,6 +94,30 @@ type LimitConfig struct {
 	MaxAdminLoginAttemptsPerMinute int `json:"max_admin_login_attempts_per_minute"`
 	MaxMuxSessionsTotal            int `json:"max_mux_sessions_total"`
 	MaxUDPFlowsTotal               int `json:"max_udp_flows_total"`
+	MaxKnockRequestsPerHour        int `json:"max_knock_requests_per_hour"`
+	MaxKnockPendingTokens          int `json:"max_knock_pending_tokens"`
+	MaxKnockGrants                 int `json:"max_knock_grants"`
+	MaxKnockMailQueue              int `json:"max_knock_mail_queue"`
+}
+
+type KnockConfig struct {
+	Enabled        bool       `json:"enabled"`
+	PublicBaseURL  string     `json:"public_base_url"`
+	MagicLinkTTL   string     `json:"magic_link_ttl"`
+	GrantTTL       string     `json:"grant_ttl"`
+	ResendInterval string     `json:"resend_interval"`
+	AllowedEmails  []string   `json:"allowed_emails"`
+	SMTP           SMTPConfig `json:"smtp"`
+}
+
+type SMTPConfig struct {
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
+	Security  string `json:"security"`
+	UserName  string `json:"user_name"`
+	Password  string `json:"password"`
+	From      string `json:"from"`
+	TLSCAFile string `json:"tls_ca_file"`
 }
 
 type ObservabilityConfig struct {
@@ -135,6 +161,7 @@ type TunnelData struct {
 	Bind                string             `json:"bind"`
 	Connect             string             `json:"connect"`
 	EnableProxyProtocol bool               `json:"enable_proxy_protocol"`
+	AllowKnockOnly      bool               `json:"allow_knock_only"`
 	AccessPolicy        AccessPolicyConfig `json:"access_policy"`
 	RateLimit           RateLimitConfig    `json:"rate_limit"`
 	TransportExplicit   bool               `json:"-"`
@@ -190,7 +217,12 @@ func DefaultServerConfig() ServerConfig {
 			MaxDataHandshakesPerMinute:     60000,
 			MaxAdminLoginAttemptsPerMinute: 10,
 			MaxControlMessageBytes:         65536, MaxMuxSessionsTotal: 4096,
-			MaxUDPFlowsTotal: 65536,
+			MaxUDPFlowsTotal: 65536, MaxKnockRequestsPerHour: 10,
+			MaxKnockPendingTokens: 1024, MaxKnockGrants: 4096,
+			MaxKnockMailQueue: 128,
+		},
+		Knock: KnockConfig{
+			MagicLinkTTL: "10m", GrantTTL: "10m", ResendInterval: "1m",
 		},
 		Observability: ObservabilityConfig{
 			AuditRetention: "4320h", NetworkRetention: "720h",
@@ -212,6 +244,14 @@ func LoadServer(path string) (ServerConfig, error) {
 		cfg.CacheDir = resolvePath(base, cfg.CacheDir)
 	}
 	cfg.RealIPHeader = textproto.CanonicalMIMEHeaderKey(cfg.RealIPHeader)
+	cfg.Knock.AllowedEmails = NormalizeEmails(cfg.Knock.AllowedEmails)
+	cfg.Knock.SMTP.Security = strings.ToLower(strings.TrimSpace(cfg.Knock.SMTP.Security))
+	cfg.Knock.SMTP.Host = strings.TrimSpace(cfg.Knock.SMTP.Host)
+	cfg.Knock.SMTP.UserName = strings.TrimSpace(cfg.Knock.SMTP.UserName)
+	cfg.Knock.SMTP.From = strings.TrimSpace(cfg.Knock.SMTP.From)
+	if cfg.Knock.SMTP.TLSCAFile != "" {
+		cfg.Knock.SMTP.TLSCAFile = resolvePath(base, cfg.Knock.SMTP.TLSCAFile)
+	}
 	cfg.LogConfig = normalizeLogConfig(base, cfg.LogConfig)
 	if source := strings.TrimSpace(cfg.Observability.GeoIPCountrySource); source != "" {
 		parsed, parseErr := url.Parse(source)
@@ -294,6 +334,9 @@ func (c ServerConfig) Validate() error {
 		return err
 	}
 	if err := validateLimits(c.Limits); err != nil {
+		return err
+	}
+	if err := validateKnock(c.Knock); err != nil {
 		return err
 	}
 	if err := validateLogConfig(c.LogConfig); err != nil {
@@ -432,10 +475,115 @@ func validateLimits(limits LimitConfig) error {
 	if limits.MaxPendingTunnels < 1 || limits.MaxTunnelsPerClient < 1 ||
 		limits.MaxControlMessageBytes < 1024 || limits.MaxDataHandshakesPerMinute < 1 ||
 		limits.MaxAdminLoginAttemptsPerMinute < 1 ||
-		limits.MaxMuxSessionsTotal < 1 || limits.MaxUDPFlowsTotal < 1 {
+		limits.MaxMuxSessionsTotal < 1 || limits.MaxUDPFlowsTotal < 1 ||
+		limits.MaxKnockRequestsPerHour < 1 || limits.MaxKnockRequestsPerHour > 10000 ||
+		limits.MaxKnockPendingTokens < 1 || limits.MaxKnockPendingTokens > 65536 ||
+		limits.MaxKnockGrants < 1 || limits.MaxKnockGrants > 65536 ||
+		limits.MaxKnockMailQueue < 1 || limits.MaxKnockMailQueue > 4096 {
 		return errors.New("invalid resource limits")
 	}
 	return nil
+}
+
+func validateKnock(value KnockConfig) error {
+	if !value.Enabled {
+		return nil
+	}
+	if err := validateKnockPublicBaseURL(value.PublicBaseURL); err != nil {
+		return err
+	}
+	if err := validateKnockDurations(value); err != nil {
+		return err
+	}
+	if err := validateKnockEmails(value.AllowedEmails); err != nil {
+		return err
+	}
+	return validateKnockSMTP(value.SMTP)
+}
+
+func validateKnockPublicBaseURL(value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" ||
+		parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("knock_config.public_base_url must be an HTTPS origin without userinfo, query, or fragment")
+	}
+	return nil
+}
+
+func validateKnockDurations(value KnockConfig) error {
+	if err := durationRange("knock_config.magic_link_ttl", value.MagicLinkTTL, 2*time.Minute, 30*time.Minute); err != nil {
+		return err
+	}
+	if err := durationRange("knock_config.grant_ttl", value.GrantTTL, time.Minute, 24*time.Hour); err != nil {
+		return err
+	}
+	return durationRange("knock_config.resend_interval", value.ResendInterval, 30*time.Second, 10*time.Minute)
+}
+
+func validateKnockEmails(values []string) error {
+	if len(values) < 1 || len(values) > 64 {
+		return errors.New("knock_config.allowed_emails must contain 1 to 64 addresses")
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, candidate := range values {
+		normalized, err := NormalizeEmail(candidate)
+		if err != nil || normalized != candidate {
+			return fmt.Errorf("knock_config.allowed_emails contains invalid address %q", candidate)
+		}
+		if _, ok := seen[normalized]; ok {
+			return fmt.Errorf("knock_config.allowed_emails contains duplicate address %q", normalized)
+		}
+		seen[normalized] = struct{}{}
+	}
+	return nil
+}
+
+func validateKnockSMTP(smtp SMTPConfig) error {
+	if smtp.Host == "" || strings.Contains(smtp.Host, "://") {
+		return errors.New("knock_config.smtp.host must be a hostname without a scheme")
+	}
+	if smtp.Port < 1 || smtp.Port > 65535 {
+		return errors.New("knock_config.smtp.port must be between 1 and 65535")
+	}
+	if smtp.Security != "tls" && smtp.Security != "starttls" {
+		return errors.New("knock_config.smtp.security must be tls or starttls")
+	}
+	if smtp.UserName == "" || smtp.Password == "" || smtp.From == "" {
+		return errors.New("knock_config.smtp user_name, password, and from are required")
+	}
+	if _, parseErr := mail.ParseAddress(smtp.From); parseErr != nil {
+		return errors.New("knock_config.smtp.from must be a valid address")
+	}
+	return nil
+}
+
+func durationRange(name, value string, minimum, maximum time.Duration) error {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration < minimum || duration > maximum {
+		return fmt.Errorf("%s must be between %s and %s", name, minimum, maximum)
+	}
+	return nil
+}
+
+func NormalizeEmail(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" || len(normalized) > 254 {
+		return "", errors.New("invalid email address")
+	}
+	address, err := mail.ParseAddress(normalized)
+	if err != nil || address.Address != normalized || address.Name != "" {
+		return "", errors.New("invalid email address")
+	}
+	return normalized, nil
+}
+
+func NormalizeEmails(values []string) []string {
+	result := make([]string, len(values))
+	for index, value := range values {
+		result[index] = strings.ToLower(strings.TrimSpace(value))
+	}
+	return result
 }
 
 func validateObservability(value ObservabilityConfig) error {
@@ -641,6 +789,28 @@ func (p ProxyEnvelope) Tunnel() (TunnelData, error) {
 		return TunnelData{}, err
 	}
 	return data, nil
+}
+
+func ValidateKnockProxyCombination(enabled bool, file ClientFile) error {
+	if enabled {
+		return nil
+	}
+	for _, client := range file.ClientConfig {
+		for _, proxy := range client.ProxyList {
+			tunnel, err := proxy.Tunnel()
+			if err != nil {
+				return fmt.Errorf("proxy %s/%s: %w", client.ClientID, proxy.ProxyID, err)
+			}
+			if tunnel.AllowKnockOnly {
+				return fmt.Errorf(
+					"proxy %s/%s requires knock_config.enabled=true",
+					client.ClientID,
+					proxy.ProxyID,
+				)
+			}
+		}
+	}
+	return nil
 }
 
 func validateTunnelTransport(data *TunnelData) error {

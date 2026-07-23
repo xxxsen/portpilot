@@ -169,6 +169,24 @@ func (m *TunnelManager) Pair(ctx context.Context, open protocol.StreamOpen, data
 		m.mu.Unlock()
 		return nil, false
 	}
+	runtime, runtimeExists := m.app.Listeners.Runtime(pending.ClientID, pending.ProxyID)
+	decision := externalAccessDecision{Reason: "proxy_unavailable"}
+	if runtimeExists {
+		decision = m.app.allowExternal(runtime, pending.External.RemoteAddr())
+	}
+	if !decision.Allowed {
+		delete(m.pending, open.ConnectionID)
+		signalTunnelDone(pending)
+		m.mu.Unlock()
+		if pending.Activity != nil {
+			pending.Activity.Fail(decision.Reason, "external source no longer allowed")
+		}
+		_ = pending.External.Close()
+		if runtimeExists {
+			m.app.recordExternalAccessDenied(runtime, "tcp", decision, 0)
+		}
+		return nil, false
+	}
 	delete(m.pending, open.ConnectionID)
 	pending.Data = dataConn
 	if pending.Activity != nil {
@@ -380,7 +398,7 @@ func (m *TunnelManager) Reconcile() {
 		runtime, ok := runtimes[proxyRuntimeKey(tunnel.ClientID, tunnel.ProxyID)]
 		allowed := ok
 		if allowed {
-			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())
+			allowed = m.app.allowExternal(runtime, tunnel.External.RemoteAddr()).Allowed
 		}
 		if !allowed {
 			delete(m.pending, id)
@@ -400,7 +418,7 @@ func (m *TunnelManager) Reconcile() {
 		runtime, ok := runtimes[proxyRuntimeKey(tunnel.ClientID, tunnel.ProxyID)]
 		allowed := ok
 		if allowed {
-			allowed, _ = m.app.allowExternal(runtime, tunnel.External.RemoteAddr())
+			allowed = m.app.allowExternal(runtime, tunnel.External.RemoteAddr()).Allowed
 		}
 		if !allowed {
 			closeItems = append(closeItems, tunnel)

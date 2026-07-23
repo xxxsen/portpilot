@@ -1,12 +1,18 @@
 package server
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"net"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/portpilot/portpilot/internal/accesspolicy"
 	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
+	"github.com/portpilot/portpilot/internal/knock"
 	"github.com/portpilot/portpilot/internal/store"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -32,6 +38,93 @@ func TestExternalAccessMetricsAccumulateWithoutSourceCardinality(t *testing.T) {
 	}
 }
 
+func TestExternalAccessKnockRunsAfterGlobalAndProxyACL(t *testing.T) {
+	t.Parallel()
+	manager, _ := newTestKnockManager(t)
+	runtime := ProxyRuntime{
+		ClientID: "client-a",
+		Proxy:    config.ProxyEnvelope{ProxyID: "proxy-a"},
+		Data:     config.TunnelData{AllowKnockOnly: true},
+		Access: accesspolicy.Compile(config.AccessPolicyConfig{
+			DenyCIDRs: []string{"198.51.100.0/24"},
+		}),
+	}
+	app := &App{
+		Knock: manager,
+		GlobalAccess: accesspolicy.Compile(config.AccessPolicyConfig{
+			DenyCIDRs: []string{"192.0.2.0/24"},
+		}),
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("192.0.2.10")); decision.Reason != "global_deny" {
+		t.Fatalf("global ACL decision = %#v", decision)
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("198.51.100.10")); decision.Reason != "proxy_deny" {
+		t.Fatalf("proxy ACL decision = %#v", decision)
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("203.0.113.10")); decision.Reason != "knock_required" {
+		t.Fatalf("missing grant decision = %#v", decision)
+	}
+	grantKnockIP(t, manager, "203.0.113.10")
+	if decision := app.allowExternal(runtime, tcpAddress("203.0.113.10")); !decision.Allowed {
+		t.Fatalf("granted source denied = %#v", decision)
+	}
+	runtime.Data.AllowKnockOnly = false
+	if decision := (&App{GlobalAccess: accesspolicy.Compile(config.AccessPolicyConfig{})}).
+		allowExternal(runtime, tcpAddress("203.0.113.11")); !decision.Allowed {
+		t.Fatalf("unprotected proxy denied = %#v", decision)
+	}
+}
+
+func TestExternalAccessKnockUnavailableFailsClosed(t *testing.T) {
+	t.Parallel()
+	app := &App{GlobalAccess: accesspolicy.Compile(config.AccessPolicyConfig{})}
+	runtime := ProxyRuntime{
+		Proxy: config.ProxyEnvelope{ProxyID: "proxy"},
+		Data:  config.TunnelData{AllowKnockOnly: true},
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("192.0.2.20")); decision.Reason != "knock_unavailable" {
+		t.Fatalf("unavailable manager decision = %#v", decision)
+	}
+}
+
+func newTestKnockManager(t *testing.T) (*knock.Manager, *serverFakeClock) {
+	t.Helper()
+	clock := &serverFakeClock{now: time.Now().UTC()}
+	randomData := make([]byte, 4096)
+	for index := range randomData {
+		randomData[index] = byte(index)
+	}
+	manager := knock.New(knock.Config{
+		MagicLinkTTL: time.Minute, GrantTTL: time.Minute, ResendInterval: time.Second,
+		AllowedEmails: []string{"user@example.com"}, MaxRequestsPerHour: 100,
+		MaxPendingTokens: 8, MaxGrants: 8, Clock: clock,
+		Random: bytes.NewReader(randomData),
+	})
+	t.Cleanup(manager.Close)
+	return manager, clock
+}
+
+func grantKnockIP(t *testing.T, manager *knock.Manager, source string) {
+	t.Helper()
+	address := netip.MustParseAddr(source)
+	result, _, err := manager.Request("user@example.com", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.RawURLEncoding.DecodeString(result.Token)
+	verification, err := manager.BeginVerify(sha256.Sum256(raw), address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CommitVerify(verification.ID, "audit"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func tcpAddress(source string) net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP(source), Port: 1234}
+}
+
 func TestExternalAccessDeniedWritesRateLimitedLogAndExactMetricOnly(t *testing.T) {
 	t.Parallel()
 	database, err := store.Open(":memory:", zap.NewNop())
@@ -51,8 +144,9 @@ func TestExternalAccessDeniedWritesRateLimitedLogAndExactMetricOnly(t *testing.T
 		ClientID: "client-a",
 		Proxy:    config.ProxyEnvelope{ProxyID: "proxy-a"},
 	}
-	app.recordExternalAccessDenied(runtime, "tcp", "192.0.2.10", 0)
-	app.recordExternalAccessDenied(runtime, "tcp", "192.0.2.10", 0)
+	decision := externalAccessDecision{SourceIP: "192.0.2.10", Reason: "global_deny"}
+	app.recordExternalAccessDenied(runtime, "tcp", decision, 0)
+	app.recordExternalAccessDenied(runtime, "tcp", decision, 0)
 
 	logs := observed.FilterMessage("external access denied").All()
 	if len(logs) != 1 {

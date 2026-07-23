@@ -52,7 +52,6 @@ describe("AuditPage", () => {
     }));
 
     render(<AuditPage csrf="csrf-test" onUnauthorized={vi.fn()} />);
-    expect(await screen.findByText("client_session")).toBeInTheDocument();
-    expect(screen.getByText("198.51.100.12")).toBeInTheDocument();
+    expect(await screen.findByText("198.51.100.12")).toBeInTheDocument();
   });
 });

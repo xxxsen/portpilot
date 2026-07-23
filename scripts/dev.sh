@@ -138,6 +138,12 @@ if [[ "${PORTPILOT_DEV_ECHO:-1}" == "1" ]]; then
   "${GO_BIN}" build -o "${DEV_BIN_DIR}/echo" "${ROOT}/test/fixtures/echo"
   start_process "echo" "${LOG_DIR}/echo.log" "${DEV_BIN_DIR}/echo"
 fi
+if [[ "${PORTPILOT_DEV_SMTP:-1}" == "1" ]]; then
+  "${GO_BIN}" build -o "${DEV_BIN_DIR}/smtp" "${ROOT}/test/fixtures/smtp"
+  start_process "smtp" "${LOG_DIR}/smtp.log" "${DEV_BIN_DIR}/smtp" \
+    --cert-dir "${DATA_DIR}/smtp"
+  wait_http "PortPilot SMTP fixture" "http://127.0.0.1:18083/health"
+fi
 start_process "server" "${LOG_DIR}/server.log" "${DEV_BIN_DIR}/portpilot-server" run --config "${SERVER_CONFIG}"
 wait_http "PortPilot server" "${ADMIN_URL}/health/ready"
 
@@ -156,6 +162,9 @@ PortPilot dev environment is ready
   TCP PROXY:  127.0.0.1:7003
   TCP limited: 127.0.0.1:7004
   UDP proxy: 127.0.0.1:7001
+  Knock TCP: 127.0.0.1:7005
+  Knock UDP: 127.0.0.1:7006
+  SMTP box:  http://127.0.0.1:18083/messages
   Logs:      ${LOG_DIR}
   Smoke:     make smoke-dev
 EOF

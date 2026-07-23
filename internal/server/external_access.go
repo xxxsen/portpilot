@@ -80,53 +80,68 @@ func (m *externalAccessMetrics) snapshot() []externalAccessMetric {
 	return result
 }
 
-func (a *App) allowExternal(runtime ProxyRuntime, remote net.Addr) (bool, string) {
-	address, err := accesspolicy.NormalizeAddr(remote)
-	if err != nil {
-		return false, ""
-	}
-	if allowed, _ := a.GlobalAccess.Decide(address); !allowed {
-		return false, address.String()
-	}
-	if allowed, _ := runtime.Access.Decide(address); !allowed {
-		return false, address.String()
-	}
-	return true, address.String()
+type externalAccessDecision struct {
+	Allowed  bool
+	SourceIP string
+	Reason   string
 }
 
-func (a *App) externalAccessDecision(
+func (a *App) allowExternal(runtime ProxyRuntime, remote net.Addr) externalAccessDecision {
+	address, err := accesspolicy.NormalizeAddr(remote)
+	if err != nil {
+		return externalAccessDecision{Reason: "source_invalid"}
+	}
+	return a.decideExternalAddress(runtime, address)
+}
+
+func (a *App) decideExternalAddress(
 	runtime ProxyRuntime,
 	address netip.Addr,
-) (bool, string) {
+) externalAccessDecision {
+	result := externalAccessDecision{SourceIP: address.String()}
 	if allowed, reason := a.GlobalAccess.Decide(address); !allowed {
-		return false, "global_" + reason
+		result.Reason = "global_" + reason
+		return result
 	}
 	if allowed, reason := runtime.Access.Decide(address); !allowed {
-		return false, "proxy_" + reason
+		result.Reason = "proxy_" + reason
+		return result
 	}
-	return true, ""
+	if runtime.Data.AllowKnockOnly {
+		if a.Knock == nil {
+			result.Reason = "knock_unavailable"
+			return result
+		}
+		if _, ok := a.Knock.ValidGrant(address); !ok {
+			result.Reason = "knock_required"
+			return result
+		}
+	}
+	result.Allowed = true
+	return result
 }
 
 func (a *App) recordExternalAccessDenied(
 	runtime ProxyRuntime,
 	network string,
-	sourceIP string,
+	decision externalAccessDecision,
 	datagramBytes int,
 ) {
-	reason := "source_invalid"
-	if address, err := accesspolicy.NormalizeIPString(sourceIP); err == nil {
-		_, reason = a.externalAccessDecision(runtime, address)
-	}
+	reason := decision.Reason
+	sourceIP := decision.SourceIP
 	a.access.observe(network, runtime.Proxy.ProxyID, reason, datagramBytes)
 	key := network + "\x00" + runtime.Proxy.ProxyID + "\x00" + sourceIP + "\x00" + reason
 	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
 		return
 	}
 	layer := "source"
-	decision := reason
+	reasonCode := reason
 	if value, rest, found := strings.Cut(reason, "_"); found {
 		layer = value
-		decision = rest
+		reasonCode = rest
+	}
+	if layer == "knock" {
+		reasonCode = reason
 	}
 	if a.Logger != nil {
 		a.Logger.Warn(
@@ -136,7 +151,7 @@ func (a *App) recordExternalAccessDenied(
 			zap.String("proxy_id", runtime.Proxy.ProxyID),
 			zap.String("source_ip", sourceIP),
 			zap.String("policy_layer", layer),
-			zap.String("reason", decision),
+			zap.String("reason", reasonCode),
 			zap.Int("datagram_bytes", datagramBytes),
 		)
 	}

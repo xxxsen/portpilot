@@ -241,6 +241,7 @@ export default function Home() {
           {view === "proxies" && config && <ProxyPage
             key={navigationKey}
             config={config}
+            csrf={session.csrf_token}
             busy={busy}
             onUnauthorized={clearSession}
             onSave={saveConfig}

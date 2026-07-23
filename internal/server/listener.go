@@ -171,11 +171,11 @@ func (m *ListenerManager) serveTCP(handle *ListenerHandle) {
 			continue
 		}
 		copy := *runtime
-		allowed, source := m.app.allowExternal(copy, conn.RemoteAddr())
-		if !allowed {
+		decision := m.app.allowExternal(copy, conn.RemoteAddr())
+		if !decision.Allowed {
 			_ = conn.Close()
 			m.app.recordExternalAccessDenied(
-				copy, "tcp", source, 0,
+				copy, "tcp", decision, 0,
 			)
 			continue
 		}
@@ -203,10 +203,10 @@ func (m *ListenerManager) serveUDP(handle *ListenerHandle) {
 		}
 		data := append([]byte(nil), buffer[:n]...)
 		copy := *runtime
-		allowed, sourceIP := m.app.allowExternal(copy, address)
-		if !allowed {
+		decision := m.app.allowExternal(copy, address)
+		if !decision.Allowed {
 			m.app.recordExternalAccessDenied(
-				copy, "udp", sourceIP, n,
+				copy, "udp", decision, n,
 			)
 			continue
 		}
@@ -234,6 +234,20 @@ func (m *ListenerManager) Snapshot() []ProxyRuntime {
 		}
 	}
 	return result
+}
+
+func (m *ListenerManager) Runtime(clientID, proxyID string) (ProxyRuntime, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	handle := m.handles[proxyRuntimeKey(clientID, proxyID)]
+	if handle == nil {
+		return ProxyRuntime{}, false
+	}
+	runtime := handle.runtime.Load()
+	if runtime == nil {
+		return ProxyRuntime{}, false
+	}
+	return *runtime, true
 }
 
 func (m *ListenerManager) UnexpectedFailures() uint64 {

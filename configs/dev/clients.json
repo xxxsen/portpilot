@@ -115,6 +115,52 @@
               "down_bytes_per_second": 0
             }
           }
+        },
+        {
+          "proxy_id": "dev-knock-tcp",
+          "remark": "Mail authorized TCP echo",
+          "kind": "tunnel",
+          "enabled": true,
+          "data": {
+            "network": "tcp",
+            "transport": "auto",
+            "bind": "127.0.0.1:7005",
+            "connect": "127.0.0.1:18080",
+            "enable_proxy_protocol": false,
+            "allow_knock_only": true,
+            "access_policy": {
+              "allow_cidrs": [],
+              "deny_cidrs": [
+                "127.0.0.9/32"
+              ]
+            },
+            "rate_limit": {
+              "up_bytes_per_second": 0,
+              "down_bytes_per_second": 0
+            }
+          }
+        },
+        {
+          "proxy_id": "dev-knock-udp",
+          "remark": "Mail authorized UDP echo",
+          "kind": "tunnel",
+          "enabled": true,
+          "data": {
+            "network": "udp",
+            "transport": "smux-datagram",
+            "bind": "127.0.0.1:7006",
+            "connect": "127.0.0.1:18081",
+            "enable_proxy_protocol": false,
+            "allow_knock_only": true,
+            "access_policy": {
+              "allow_cidrs": [],
+              "deny_cidrs": []
+            },
+            "rate_limit": {
+              "up_bytes_per_second": 0,
+              "down_bytes_per_second": 0
+            }
+          }
         }
       ]
     }

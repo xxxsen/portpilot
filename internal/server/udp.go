@@ -439,7 +439,7 @@ func (m *UDPManager) reconcileFlows() {
 		runtime, ok := runtimes[proxyRuntimeKey(flow.ClientID, flow.ProxyID)]
 		allowed := ok
 		if allowed {
-			allowed, _ = m.app.allowExternal(runtime, flow.Source)
+			allowed = m.app.allowExternal(runtime, flow.Source).Allowed
 		}
 		if !allowed {
 			delete(m.byID, key)

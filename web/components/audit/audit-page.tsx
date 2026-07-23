@@ -11,7 +11,7 @@ const eventTypes = [
   "admin_login", "admin_logout", "data_export", "config_update", "client_created", "client_updated",
   "client_token_rotated", "admin_client_disconnect", "client_session",
   "client_agent_invalid", "database_rebuilt", "system_start", "system_stop",
-  "config_metadata_migrated",
+  "config_metadata_migrated", "knock_grant_created", "knock_grant_revoked",
 ];
 
 export function AuditPage({csrf, onUnauthorized}: {csrf: string; onUnauthorized: () => void}) {

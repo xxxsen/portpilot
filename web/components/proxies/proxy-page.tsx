@@ -6,11 +6,16 @@ import {
   ChevronRight,
   Pencil,
   Plus,
+  ShieldCheck,
   Settings2,
   Trash2,
+  X,
 } from "lucide-react";
 import type {
   ClientFile,
+  KnockGrant,
+  KnockGrantPage,
+  KnockStatus,
   NavigationDestination,
   Proxy,
   ProxyRuntime,
@@ -35,12 +40,14 @@ const emptyRuntime: ProxyRuntimePage = {
 
 export function ProxyPage({
   config,
+  csrf,
   busy,
   onSave,
   onUnauthorized,
   onNavigate,
 }: {
   config: ClientFile;
+  csrf: string;
   busy: boolean;
   onSave: (next: ClientFile) => Promise<void>;
   onUnauthorized: () => void;
@@ -62,6 +69,10 @@ export function ProxyPage({
   const [runtime, setRuntime] = useState<ProxyRuntimePage>(emptyRuntime);
   const [runtimePage, setRuntimePage] = useState(1);
   const [runtimeStale, setRuntimeStale] = useState(false);
+  const [knockEnabled, setKnockEnabled] = useState(false);
+  const [grants, setGrants] = useState<KnockGrant[]>([]);
+  const [grantsStale, setGrantsStale] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<KnockGrant | null>(null);
   const [deepLinkError, setDeepLinkError] = useState("");
   const [targetLookup, setTargetLookup] = useState(initialTarget);
   const [selectedRuntime, setSelectedRuntime] = useState(initialTarget);
@@ -89,6 +100,30 @@ export function ProxyPage({
       .then((result) => setGlobalAccess(result.global))
       .catch(() => undefined);
   }, []);
+
+  const loadGrants = useCallback(async () => {
+    try {
+      const [status, grantPage] = await Promise.all([
+        api<KnockStatus>("/api/knock/status"),
+        api<KnockGrantPage>("/api/knock/grants"),
+      ]);
+      setKnockEnabled(status.enabled);
+      setGrants(grantPage.items);
+      setGrantsStale(false);
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 401) onUnauthorized();
+      setGrantsStale(true);
+    }
+  }, [onUnauthorized]);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => void loadGrants(), 0);
+    const timer = window.setInterval(() => void loadGrants(), 15_000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, [loadGrants]);
 
   const loadRuntime = useCallback(async () => {
     runtimeRequest.current?.abort();
@@ -237,7 +272,7 @@ export function ProxyPage({
                 <td><strong>{proxy.remark || proxy.proxy_id}</strong><small>{proxy.proxy_id}</small></td>
                 <td><strong>{client.remark || client.client_id}</strong><small>{client.client_id}</small></td>
                 <td><Availability value={item.availability} /><small>{item.reason_code}</small></td>
-                <td><span className={`network-tag ${item.protocol}`}>{item.protocol.toUpperCase()}</span><small>{item.transport} → {item.effective_transport}</small></td>
+                <td><span className={`network-tag ${item.protocol}`}>{item.protocol.toUpperCase()}</span><small>{item.transport} → {item.effective_transport}{proxy.data.allow_knock_only ? " · 邮件授权" : ""}</small></td>
                 <td className="proxy-route-cell"><span className="mono">{item.bind}</span><small className="mono">{item.connect}</small></td>
                 <td className="stable-number"><strong>{item.realtime.active_connections}</strong><small>↑ {formatRuntimeRate(item.realtime.up_bytes_per_second)} · ↓ {formatRuntimeRate(item.realtime.down_bytes_per_second)}</small></td>
                 <td className="stable-number">{item.history.connections === null ? "-" : item.history.connections}<small>{item.history.failure_rate === null ? "历史不可用" : `失败 ${(item.history.failure_rate * 100).toFixed(1)}%`}</small></td>
@@ -269,10 +304,41 @@ export function ProxyPage({
           <button className="icon-button" disabled={runtimePage >= runtime.total_pages} onClick={() => setRuntimePage((value) => value + 1)} aria-label="代理下一页"><ChevronRight size={17} /></button>
         </div>
       </>}
+      <section className="section-block knock-grants-section">
+        <div className="section-heading">
+          <div><h2>当前临时授权</h2><p>通过邮件链接获得代理端口访问权限的来源 IP</p></div>
+          <span className={`knock-service-state ${knockEnabled ? "enabled" : ""}`}>
+            <ShieldCheck size={15} />{knockEnabled ? "敲门已启用" : "敲门未启用"}
+          </span>
+        </div>
+        {grantsStale && <div className="stale-banner">授权列表刷新失败，当前内容可能已过期</div>}
+        <div className="table-wrap">
+          <table className="knock-grants-table">
+            <thead><tr><th>来源 IP</th><th>授权邮箱</th><th>授权时间</th><th>到期时间</th><th>剩余</th><th aria-label="操作" /></tr></thead>
+            <tbody>
+              {grants.map((grant) => <tr key={grant.source_ip}>
+                <td className="mono"><strong>{grant.source_ip}</strong></td>
+                <td>{grant.granted_by}</td>
+                <td>{new Date(grant.granted_at).toLocaleString()}</td>
+                <td>{new Date(grant.expires_at).toLocaleString()}</td>
+                <td className="stable-number"><GrantCountdown expiresAt={grant.expires_at} /></td>
+                <td><button
+                  className="icon-button danger"
+                  onClick={() => setRevokeTarget(grant)}
+                  title="撤销临时授权"
+                  aria-label={`撤销 ${grant.source_ip} 的临时授权`}
+                ><X size={16} /></button></td>
+              </tr>)}
+              {!grants.length && <tr><td colSpan={6}><div className="empty-inline">当前没有生效中的临时授权</div></td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
       {editor && <ProxyEditor
         editor={editor}
         config={config}
         globalAccess={globalAccess}
+        knockEnabled={knockEnabled}
         busy={busy}
         onClose={() => setEditor(null)}
         onSave={async (clientID, proxy) => {
@@ -312,6 +378,26 @@ export function ProxyPage({
         busy={busy}
         onConfirm={() => void remove()}
       />
+      <AlertDialog
+        open={Boolean(revokeTarget)}
+        onOpenChange={(open) => {if (!open) setRevokeTarget(null);}}
+        title="撤销临时授权"
+        description={`撤销 ${revokeTarget?.source_ip ?? ""} 后，该 IP 的新连接将立即被拒绝。`}
+        confirmLabel="确认撤销"
+        onConfirm={() => {
+          if (!revokeTarget) return;
+          const sourceIP = revokeTarget.source_ip;
+          void api(`/api/knock/grants/${encodeURIComponent(sourceIP)}`, {
+            method: "DELETE", csrf,
+          }).then(() => {
+            setGrants((current) => current.filter((item) => item.source_ip !== sourceIP));
+            setRevokeTarget(null);
+          }).catch((caught) => {
+            if (caught instanceof ApiError && caught.status === 401) onUnauthorized();
+            setGrantsStale(true);
+          });
+        }}
+      />
     </section>
   );
 }
@@ -322,10 +408,26 @@ function formatRuntimeRate(value: number) {
   return `${(value / (1024 * 1024)).toFixed(1)} MiB/s`;
 }
 
+function GrantCountdown({expiresAt}: {expiresAt: number}) {
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    const initial = window.setTimeout(() => setNow(Date.now()), 0);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(timer);
+    };
+  }, []);
+  if (!now) return <>-</>;
+  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  return <>{Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}</>;
+}
+
 function ProxyEditor({
   editor,
   config,
   globalAccess,
+  knockEnabled,
   busy,
   onClose,
   onSave,
@@ -333,6 +435,7 @@ function ProxyEditor({
   editor: Editor;
   config: ClientFile;
   globalAccess: AccessPolicy;
+  knockEnabled: boolean;
   busy: boolean;
   onClose: () => void;
   onSave: (clientID: string, proxy: Proxy) => Promise<void>;
@@ -344,6 +447,7 @@ function ProxyEditor({
   const initial: TunnelData = {
     ...initialValue,
     enable_proxy_protocol: initialValue.enable_proxy_protocol ?? false,
+    allow_knock_only: initialValue.allow_knock_only ?? false,
     access_policy: initialValue.access_policy ?? {allow_cidrs: [], deny_cidrs: []},
     rate_limit: initialValue.rate_limit ?? {up_bytes_per_second: 0, down_bytes_per_second: 0},
   };
@@ -419,6 +523,19 @@ function ProxyEditor({
                 />
               </label>
             </div>
+            <label className="toggle-setting knock-toggle">
+              <span><strong>仅允许已邮件授权 IP</strong><small>{knockEnabled ? "通过 Magic Link 临时授权后才允许访问" : "服务端未启用邮件敲门"}</small></span>
+              <span className="switch">
+                <input
+                  type="checkbox"
+                  checked={data.allow_knock_only ?? false}
+                  disabled={!knockEnabled}
+                  onChange={(event) => setData({...data, allow_knock_only: event.target.checked})}
+                  aria-label="仅允许已邮件授权 IP"
+                />
+                <span />
+              </span>
+            </label>
           </fieldset>
           <fieldset className="form-section form-span">
             <legend>目标来源传递</legend>
