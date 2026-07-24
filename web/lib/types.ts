@@ -341,6 +341,7 @@ export type AnalyticsIPSeries = AnalyticsMetadata & {
 };
 
 export type Summary = {
+  server_version: string;
   online_clients: number;
   pending_tunnels: number;
   active_tunnels: number;

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverviewPage } from "@/components/overview/overview-page";
-import type { AuditEvent, ClientView } from "@/lib/types";
+import type { AuditEvent, ClientView, Summary } from "@/lib/types";
 
 afterEach(cleanup);
 
@@ -52,6 +52,18 @@ const recentEvent: AuditEvent = {
   config_changes: [],
 };
 
+const summary: Summary = {
+  server_version: "v1.2.3",
+  online_clients: 1,
+  pending_tunnels: 0,
+  active_tunnels: 0,
+  listeners: 5,
+  udp_channels: 0,
+  udp_pending_channels: 0,
+  udp_flows: 0,
+  degraded: false,
+};
+
 describe("OverviewPage", () => {
   it("shows the last heartbeat and opens the shared client detail drawer", () => {
     render(<OverviewPage summary={null} clients={[client]} events={[]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
@@ -62,6 +74,26 @@ describe("OverviewPage", () => {
     expect(within(dialog).getByRole("heading", {name: "Agent 环境"})).toBeInTheDocument();
     expect(within(dialog).getByText("branch-host")).toBeInTheDocument();
     expect(within(dialog).getByText("最后心跳")).toBeInTheDocument();
+  });
+
+  it("shows client and server versions with match status", () => {
+    const mismatched = {
+      ...client,
+      client_id: "branch-b",
+      remark: "Branch B",
+      agent: client.agent ? {...client.agent, version: "v1.2.2"} : null,
+    };
+
+    render(<OverviewPage summary={summary} clients={[client, mismatched]} events={[]} onNavigate={vi.fn()} onUnauthorized={vi.fn()} />);
+
+    expect(screen.getByLabelText("客户端版本 v1.2.3，服务端版本 v1.2.3")).toBeInTheDocument();
+    expect(screen.getByTitle("客户端版本：v1.2.3")).toHaveClass("version-match");
+    expect(screen.getAllByTitle("服务端版本：v1.2.3")).toHaveLength(2);
+    for (const serverVersion of screen.getAllByTitle("服务端版本：v1.2.3")) {
+      expect(serverVersion).toHaveClass("version-match");
+    }
+    expect(screen.getByLabelText("客户端版本 v1.2.2，服务端版本 v1.2.3")).toBeInTheDocument();
+    expect(screen.getByTitle("客户端版本：v1.2.2")).toHaveClass("version-mismatch");
   });
 
   it("opens network activity for the selected client without opening details", () => {

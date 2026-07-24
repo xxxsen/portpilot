@@ -25,6 +25,7 @@ export function ClientPage({
   const [oneTimeToken, setOneTimeToken] = useState("");
   const [tokenVisible, setTokenVisible] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedClientID, setCopiedClientID] = useState("");
   const [busy, setBusy] = useState(false);
   const initialClientID = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get("client_id") ?? "";
   const [detail, setDetail] = useState<ClientView | null>(() => data.items.find((client) => client.client_id === initialClientID) ?? null);
@@ -43,6 +44,12 @@ export function ClientPage({
     const timer = window.setTimeout(() => onError("对象不存在或已被删除"), 0);
     return () => window.clearTimeout(timer);
   }, [detail, initialClientID, onError]);
+
+  useEffect(() => {
+    if (!copiedClientID) return;
+    const timer = window.setTimeout(() => setCopiedClientID(""), 2000);
+    return () => window.clearTimeout(timer);
+  }, [copiedClientID]);
 
   const mutationError = async (caught: unknown) => {
     if (caught instanceof ApiError && caught.status === 409) {
@@ -84,6 +91,15 @@ export function ClientPage({
     }
   };
 
+  const copyClientID = async (clientID: string) => {
+    try {
+      await navigator.clipboard.writeText(clientID);
+      setCopiedClientID(clientID);
+    } catch {
+      onError("复制失败，请手动复制客户端 ID");
+    }
+  };
+
   return (
     <section className="section-block first">
       <div className="section-heading">
@@ -101,13 +117,20 @@ export function ClientPage({
                 <strong>{client.remark}</strong>
                 <ClientStatus value={client.state} />
               </div>
-              <button
-                className="copy-id mono"
-                onClick={() => void navigator.clipboard.writeText(client.client_id)}
-                title="复制客户端 ID"
-              >
-                {client.client_id}<Copy size={13} />
-              </button>
+              <div className="client-id-line">
+                <code>{client.client_id}</code>
+                <button
+                  className={copiedClientID === client.client_id ? "copy-id-button copied" : "copy-id-button"}
+                  onClick={() => void copyClientID(client.client_id)}
+                  title={copiedClientID === client.client_id ? "已复制" : "复制客户端 ID"}
+                  aria-label={`复制 ${client.client_id} 客户端 ID`}
+                >
+                  {copiedClientID === client.client_id ? <Check size={14} /> : <Copy size={14} />}
+                </button>
+                <span className="copy-id-feedback" aria-live="polite">
+                  {copiedClientID === client.client_id ? "已复制" : ""}
+                </span>
+              </div>
               <div className="client-meta">
                 <span>{client.proxy_count} 条代理</span>
                 <span>{client.mux_sessions} 个 smux session</span>

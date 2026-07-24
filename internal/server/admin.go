@@ -23,6 +23,7 @@ import (
 	"github.com/portpilot/portpilot/internal/mailer"
 	"github.com/portpilot/portpilot/internal/protocol"
 	"github.com/portpilot/portpilot/internal/store"
+	"github.com/portpilot/portpilot/internal/version"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -563,6 +564,7 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 		"knock_mail_failed_total":           mailStats.FailedTotal,
 		"knock_mail_last_success_at":        mailStats.LastSuccessAt,
 		"knock_mail_last_error_at":          mailStats.LastErrorAt,
+		"server_version":                    version.Version,
 		"degraded":                          a.Degraded(),
 	})
 }

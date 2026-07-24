@@ -15,6 +15,7 @@ import (
 	"github.com/portpilot/portpilot/internal/activity"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/store"
+	"github.com/portpilot/portpilot/internal/version"
 	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -72,6 +73,38 @@ func TestAdminLoginUsesSelectedAbsoluteTTL(t *testing.T) {
 	if page.Total != 1 || page.Items[0].Outcome != "success" ||
 		page.Items[0].SourceAddr != "192.0.2.1" {
 		t.Fatalf("login audit missing: %#v", page)
+	}
+}
+
+func TestSummaryIncludesServerVersion(t *testing.T) {
+	t.Parallel()
+
+	app := &App{Config: config.DefaultServerConfig(), Logger: zap.NewNop()}
+	app.Sessions = NewSessionManager(app)
+	app.Listeners = NewListenerManager(app)
+	app.Tunnels = NewTunnelManager(app)
+	app.UDP = NewUDPManager(app)
+	app.exports = newExportManager()
+	t.Cleanup(func() {
+		app.UDP.Close()
+		app.Listeners.Close()
+		app.exports.cancel()
+	})
+
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/metrics/summary", nil)
+	response := httptest.NewRecorder()
+	app.handleSummary(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("summary status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		ServerVersion string `json:"server_version"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ServerVersion != version.Version {
+		t.Fatalf("server_version=%q, want %q", payload.ServerVersion, version.Version)
 	}
 }
 

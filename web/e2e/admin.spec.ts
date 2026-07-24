@@ -167,6 +167,8 @@ test("live status and audit views expose the formal server state", async ({page}
   const overviewClient = page.locator(".overview-client-row").filter({hasText: "dev-client"});
   await expect(overviewClient).toContainText("心跳");
   await expect(overviewClient).not.toContainText("心跳 -");
+  await expect(overviewClient.getByLabel("客户端版本 dev，服务端版本 dev")).toBeVisible();
+  await expect(overviewClient.locator(".client-version")).toHaveClass(/version-match/);
   await overviewClient.locator("td").first().click();
   const overviewDetail = page.getByRole("dialog", {name: "本地开发客户端"});
   await expect(overviewDetail.getByRole("heading", {name: "Agent 环境"})).toBeVisible();

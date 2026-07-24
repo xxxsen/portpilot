@@ -52,9 +52,10 @@ export function OverviewPage({
       <AttentionList onNavigate={onNavigate} onUnauthorized={onUnauthorized} />
       <section className="section-block">
         <div className="section-heading"><div><h2>客户端状态</h2><p>控制会话与 smux 池</p></div></div>
-        <div className="table-wrap"><table className="overview-client-table"><thead><tr><th>客户端</th><th>状态 / 最后心跳</th><th>Epoch</th><th>smux</th><th>活动流</th><th aria-label="操作" /></tr></thead><tbody>
+        <div className="table-wrap"><table className="overview-client-table"><thead><tr><th>客户端</th><th>版本号</th><th>状态 / 最后心跳</th><th>Epoch</th><th>smux</th><th>活动流</th><th aria-label="操作" /></tr></thead><tbody>
           {clients.map((client) => <tr key={client.client_id} className="clickable-row overview-client-row" onClick={() => setDetailClientID(client.client_id)}>
             <td><strong>{client.remark || client.client_id}</strong><small>{client.client_id}</small></td>
+            <td><VersionComparison clientVersion={client.agent?.version ?? ""} serverVersion={summary?.server_version ?? ""} /></td>
             <td><ClientStatus value={client.state} /><small>心跳 {formatClientTime(client.session?.last_seen_at ?? 0)}</small></td>
             <td>{client.epoch || "-"}</td><td>{client.mux_sessions}</td><td>{client.active_streams}</td>
             <td><button
@@ -70,7 +71,7 @@ export function OverviewPage({
               }}
             ><Activity size={17} /></button></td>
           </tr>)}
-          {!clients.length && <tr><td colSpan={6}><div className="empty-inline">还没有客户端</div></td></tr>}
+          {!clients.length && <tr><td colSpan={7}><div className="empty-inline">还没有客户端</div></td></tr>}
         </tbody></table></div>
       </section>
       <section className="section-block">
@@ -99,6 +100,23 @@ export function OverviewPage({
       <ClientDetailDialog client={detail} onClose={() => setDetailClientID("")} />
     </>
   );
+}
+
+function VersionComparison({clientVersion, serverVersion}: {clientVersion: string; serverVersion: string}) {
+  const clientLabel = clientVersion || "未知";
+  const serverLabel = serverVersion || "未知";
+  const clientState = !clientVersion || !serverVersion
+    ? "unknown"
+    : clientVersion === serverVersion ? "match" : "mismatch";
+
+  return <div
+    className="version-comparison mono"
+    aria-label={`客户端版本 ${clientLabel}，服务端版本 ${serverLabel}`}
+  >
+    <span className={`client-version version-${clientState}`} title={`客户端版本：${clientLabel}`}>{clientLabel}</span>
+    <span className="version-divider" aria-hidden="true">/</span>
+    <span className={serverVersion ? "server-version version-match" : "server-version version-unknown"} title={`服务端版本：${serverLabel}`}>{serverLabel}</span>
+  </div>;
 }
 
 function eventObject(event: AuditEvent) {
