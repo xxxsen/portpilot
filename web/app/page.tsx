@@ -6,6 +6,7 @@ import {
   Cable,
   CircleGauge,
   LogOut,
+  Mail,
   Menu,
   Network,
   RefreshCw,
@@ -296,6 +297,13 @@ function Login({
           </div>
         </fieldset>
         <button className="primary-button" disabled={busy}>{busy ? "正在验证..." : "登录"}</button>
+        <div className="login-knock-entry">
+          <div>
+            <strong>访问代理端口</strong>
+            <span>为当前 IP 获取临时访问权限</span>
+          </div>
+          <a className="secondary-button" href="/knock"><Mail size={16} />邮件授权</a>
+        </div>
       </form>
     </main>
   );

@@ -19,5 +19,7 @@ describe("Home", () => {
     expect(screen.getByLabelText("30 分钟")).toBeChecked();
     expect(screen.getByLabelText("1 小时")).toBeInTheDocument();
     expect(screen.getByLabelText("24 小时")).toBeInTheDocument();
+    expect(screen.getByRole("link", {name: "邮件授权"})).toHaveAttribute("href", "/knock");
+    expect(screen.getByText("为当前 IP 获取临时访问权限")).toBeInTheDocument();
   });
 });

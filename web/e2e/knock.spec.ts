@@ -3,7 +3,9 @@ import {expect, test} from "@playwright/test";
 test("email Magic Link grants and admin revokes the current source", async ({page}, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "mailbox and grant mutation runs once");
   await page.request.delete("http://127.0.0.1:18083/messages");
-  await page.goto("/knock");
+  await page.goto("/");
+  await page.getByRole("link", {name: "邮件授权"}).click();
+  await expect(page).toHaveURL(/\/knock$/);
   await expect(page.getByRole("heading", {name: "临时访问授权"})).toBeVisible();
   await expect(page.getByText("127.0.0.1", {exact: true})).toBeVisible();
   await page.getByLabel("授权邮箱").fill("e2e@example.com");
