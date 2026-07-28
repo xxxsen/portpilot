@@ -116,7 +116,7 @@ PortPilot 使用三类配置：
 | `users` | 管理员账号和 bcrypt password hash |
 | `client_config_file` | 客户端与代理配置文件路径 |
 | `cache_dir` | SQLite、远程 GeoIP 等可重建派生数据的易失缓存根目录 |
-| `access_policy` | 动态代理端口的全局外部来源 CIDR allow/deny |
+| `access_policy` | 动态代理端口的全局仅内网访问或外部来源 CIDR allow/deny |
 | `data_plane` | transport、smux pool 和 UDP 参数 |
 | `timeouts` | 握手、心跳、建链、空闲和最长生命周期 |
 | `limits` | pending、tunnel、session、flow、消息和速率上限 |
@@ -155,6 +155,7 @@ PortPilot 使用三类配置：
             "connect": "192.168.50.11:22",
             "enable_proxy_protocol": true,
             "access_policy": {
+              "private_only": false,
               "allow_cidrs": ["203.0.113.0/24"],
               "deny_cidrs": ["203.0.113.128/25"]
             },
@@ -195,8 +196,9 @@ PortPilot 使用三类配置：
 - UDP transport 固定为 `smux-datagram`。
 - `bind` 和 `connect` 使用结构化 host/port 解析。
 - 代理端口在服务端范围内全局唯一，并且不能与管理和数据入口冲突。
-- `access_policy` 只限制连接代理端口的外部 socket 来源；全局与代理 allow 取交集，任意
-  deny 优先。
+- `access_policy` 只限制连接代理端口的外部 socket 来源；`private_only=true` 仅允许
+  loopback、RFC 1918 IPv4 和 IPv6 ULA，且不能同时配置 allow/deny；CIDR 模式下全局与代理
+  allow 取交集，任意 deny 优先。
 - `rate_limit` 按每条 TCP 连接或每个 UDP flow 分别限制上行与下行 payload bytes/s，零值
   表示不限速。
 - `enable_proxy_protocol` 缺省关闭，只允许 TCP；启用后目标必须接受 PROXY Protocol v1。
@@ -462,10 +464,11 @@ sequenceDiagram
 
 ### 7.3 外部来源策略
 
-全局和代理策略都使用 canonical IPv4/IPv6 CIDR。来源先去端口和 IPv6 zone，再对
-IPv4-mapped IPv6 执行 unmap。允许条件是来源不命中任意 deny，并满足每个非空 allow 列表；
-解析失败时 fail closed。TCP 在 activity、ticket 和信令创建前判定，UDP 在 flow 查找前对
-每个 datagram 判定。
+全局和代理策略可使用 `private_only` 或 canonical IPv4/IPv6 CIDR，两种模式互斥。
+`private_only=true` 时只允许 loopback、RFC 1918 IPv4 和 IPv6 ULA，不把 link-local、CGNAT、
+保留地址或公网地址视为内网。来源先去端口和 IPv6 zone，再对 IPv4-mapped IPv6 执行 unmap。
+CIDR 模式的允许条件是来源不命中任意 deny，并满足每个非空 allow 列表；解析失败时 fail
+closed。TCP 在 activity、ticket 和信令创建前判定，UDP 在 flow 查找前对每个 datagram 判定。
 
 代理策略提交后，新请求立即使用新快照；不再允许的 pending/active TCP 和 UDP flow 以
 `source_policy_changed` 关闭，UDP 同时向客户端发送 `FLOW_CLOSE`。来源拒绝写结构化日志、

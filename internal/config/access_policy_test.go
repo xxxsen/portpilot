@@ -19,6 +19,10 @@ func TestAccessPolicyValidation(t *testing.T) {
 		"host bits": {AllowCIDRs: []string{"192.0.2.1/24"}},
 		"bare ip":   {AllowCIDRs: []string{"192.0.2.1"}},
 		"duplicate": {DenyCIDRs: []string{"192.0.2.0/24", "192.0.2.0/24"}},
+		"private only with CIDR": {
+			PrivateOnly: true,
+			AllowCIDRs:  []string{"192.0.2.0/24"},
+		},
 		"conflict": {
 			AllowCIDRs: []string{"192.0.2.0/24"},
 			DenyCIDRs:  []string{"192.0.2.0/24"},
@@ -28,6 +32,24 @@ func TestAccessPolicyValidation(t *testing.T) {
 		if err := policy.Validate(); err == nil {
 			t.Errorf("%s policy was accepted", name)
 		}
+	}
+}
+
+func TestAccessPolicyPrivateOnlyPersistsInJSON(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(AccessPolicyConfig{PrivateOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"private_only":true`) {
+		t.Fatalf("private-only marker missing from JSON: %s", raw)
+	}
+	var decoded AccessPolicyConfig
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.PrivateOnly {
+		t.Fatal("private-only marker was not restored")
 	}
 }
 

@@ -82,6 +82,7 @@ TCP 和 UDP tunnel 的 `data` 都支持：
   "connect": "192.168.50.11:22",
   "allow_knock_only": true,
   "access_policy": {
+    "private_only": false,
     "allow_cidrs": [],
     "deny_cidrs": []
   }

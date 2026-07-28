@@ -23,7 +23,7 @@ import type {
   TunnelData,
 } from "@/lib/types";
 import {api, ApiError} from "@/lib/api";
-import {validateProxyDraft} from "@/lib/validation";
+import {parseCIDRLines, validateProxyDraft} from "@/lib/validation";
 import {AlertDialog, Dialog} from "@/components/ui/dialog";
 import {
   Availability,
@@ -31,7 +31,7 @@ import {
 } from "@/components/proxies/proxy-runtime-detail";
 
 type Editor = {clientId: string; proxy?: Proxy};
-type AccessPolicy = {allow_cidrs: string[]; deny_cidrs: string[]};
+type AccessPolicy = {private_only?: boolean; allow_cidrs: string[]; deny_cidrs: string[]};
 type AccessPolicyResponse = {global: AccessPolicy};
 const emptyRuntime: ProxyRuntimePage = {
   revision: 0, snapshot_at: 0, items: [],
@@ -272,7 +272,7 @@ export function ProxyPage({
                 <td><strong>{proxy.remark || proxy.proxy_id}</strong><small>{proxy.proxy_id}</small></td>
                 <td><strong>{client.remark || client.client_id}</strong><small>{client.client_id}</small></td>
                 <td><Availability value={item.availability} /><small>{item.reason_code}</small></td>
-                <td><span className={`network-tag ${item.protocol}`}>{item.protocol.toUpperCase()}</span><small>{item.transport} → {item.effective_transport}{proxy.data.allow_knock_only ? " · 邮件授权" : ""}</small></td>
+                <td><span className={`network-tag ${item.protocol}`}>{item.protocol.toUpperCase()}</span><small>{item.transport} → {item.effective_transport}{proxy.data.access_policy?.private_only ? " · 仅内网" : ""}{proxy.data.allow_knock_only ? " · 邮件授权" : ""}</small></td>
                 <td className="proxy-route-cell"><span className="mono">{item.bind}</span><small className="mono">{item.connect}</small></td>
                 <td className="stable-number"><strong>{item.realtime.active_connections}</strong><small>↑ {formatRuntimeRate(item.realtime.up_bytes_per_second)} · ↓ {formatRuntimeRate(item.realtime.down_bytes_per_second)}</small></td>
                 <td className="stable-number">{item.history.connections === null ? "-" : item.history.connections}<small>{item.history.failure_rate === null ? "历史不可用" : `失败 ${(item.history.failure_rate * 100).toFixed(1)}%`}</small></td>
@@ -448,13 +448,16 @@ function ProxyEditor({
     ...initialValue,
     enable_proxy_protocol: initialValue.enable_proxy_protocol ?? false,
     allow_knock_only: initialValue.allow_knock_only ?? false,
-    access_policy: initialValue.access_policy ?? {allow_cidrs: [], deny_cidrs: []},
+    access_policy: initialValue.access_policy ?? {private_only: false, allow_cidrs: [], deny_cidrs: []},
     rate_limit: initialValue.rate_limit ?? {up_bytes_per_second: 0, down_bytes_per_second: 0},
   };
   const [clientID, setClientID] = useState(editor.clientId);
   const [proxyID, setProxyID] = useState(proxy?.proxy_id ?? "");
   const [remark, setRemark] = useState(proxy?.remark ?? "");
   const [data, setData] = useState<TunnelData>(initial);
+  const [privateOnly, setPrivateOnly] = useState(initial.access_policy?.private_only ?? false);
+  const [allowCIDRs, setAllowCIDRs] = useState(initial.access_policy?.allow_cidrs.join("\n") ?? "");
+  const [denyCIDRs, setDenyCIDRs] = useState(initial.access_policy?.deny_cidrs.join("\n") ?? "");
   const [validationError, setValidationError] = useState("");
   const selected = config.client_config.find((client) => client.client_id === clientID);
   return (
@@ -465,7 +468,20 @@ function ProxyEditor({
           setValidationError("请选择客户端");
           return;
         }
-        const draft: Proxy = {proxy_id: proxyID, remark, kind: "tunnel", enabled: proxy?.enabled ?? true, data};
+        const draft: Proxy = {
+          proxy_id: proxyID,
+          remark,
+          kind: "tunnel",
+          enabled: proxy?.enabled ?? true,
+          data: {
+            ...data,
+            access_policy: {
+              private_only: privateOnly,
+              allow_cidrs: privateOnly ? [] : parseCIDRLines(allowCIDRs),
+              deny_cidrs: privateOnly ? [] : parseCIDRLines(denyCIDRs),
+            },
+          },
+        };
         const issue = validateProxyDraft(draft, config.client_config.flatMap((client) => client.proxy_list), proxy?.proxy_id);
         if (issue) {
           setValidationError(issue);
@@ -498,28 +514,38 @@ function ProxyEditor({
           <label>内网目标<input className="mono" value={data.connect} onChange={(event) => setData({...data, connect: event.target.value})} required /></label>
           <fieldset className="form-section form-span">
             <legend>外部访问</legend>
-            <p>服务端全局策略：允许 {globalAccess.allow_cidrs.length || "全部"}，拒绝 {globalAccess.deny_cidrs.length || "无"}</p>
-            <div className="form-grid nested">
+            <p>{globalAccess.private_only
+              ? "服务端全局策略：仅内网访问"
+              : `服务端全局策略：允许 ${globalAccess.allow_cidrs.length || "全部"}，拒绝 ${globalAccess.deny_cidrs.length || "无"}`}</p>
+            <label className={`toggle-setting access-mode-toggle ${privateOnly ? "active" : ""}`}>
+              <span><strong>仅内网访问</strong><small>仅允许 loopback、私有 IPv4 和 IPv6 ULA 来源</small></span>
+              <span className="switch">
+                <input
+                  type="checkbox"
+                  checked={privateOnly}
+                  onChange={(event) => setPrivateOnly(event.target.checked)}
+                  aria-label="仅内网访问"
+                />
+                <span />
+              </span>
+            </label>
+            <div className={`form-grid nested cidr-grid ${privateOnly ? "disabled" : ""}`}>
               <label>允许来源 CIDR
                 <textarea
                   className="mono"
                   placeholder="每行一个 CIDR；留空不增加限制"
-                  value={(data.access_policy?.allow_cidrs ?? []).join("\n")}
-                  onChange={(event) => setData({...data, access_policy: {
-                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
-                    allow_cidrs: cidrLines(event.target.value),
-                  }})}
+                  value={privateOnly ? "" : allowCIDRs}
+                  disabled={privateOnly}
+                  onChange={(event) => setAllowCIDRs(event.target.value)}
                 />
               </label>
               <label>拒绝来源 CIDR
                 <textarea
                   className="mono"
                   placeholder="每行一个 CIDR"
-                  value={(data.access_policy?.deny_cidrs ?? []).join("\n")}
-                  onChange={(event) => setData({...data, access_policy: {
-                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
-                    deny_cidrs: cidrLines(event.target.value),
-                  }})}
+                  value={privateOnly ? "" : denyCIDRs}
+                  disabled={privateOnly}
+                  onChange={(event) => setDenyCIDRs(event.target.value)}
                 />
               </label>
             </div>
@@ -612,10 +638,6 @@ function RateInput({label, value, onChange}: {label: string; value: number; onCh
       </label>
     </div>
   );
-}
-
-function cidrLines(value: string) {
-  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
 function runtimeKey(clientID: string, proxyID: string) {

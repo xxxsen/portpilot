@@ -87,6 +87,21 @@ func TestExternalAccessKnockUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestExternalAccessPrivateOnlyUsesProxyPolicyReason(t *testing.T) {
+	t.Parallel()
+	app := &App{GlobalAccess: accesspolicy.Compile(config.AccessPolicyConfig{})}
+	runtime := ProxyRuntime{
+		Proxy:  config.ProxyEnvelope{ProxyID: "proxy"},
+		Access: accesspolicy.Compile(config.AccessPolicyConfig{PrivateOnly: true}),
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("192.168.1.20")); !decision.Allowed {
+		t.Fatalf("private source denied = %#v", decision)
+	}
+	if decision := app.allowExternal(runtime, tcpAddress("8.8.8.8")); decision.Reason != "proxy_private_only" {
+		t.Fatalf("public source decision = %#v", decision)
+	}
+}
+
 func newTestKnockManager(t *testing.T) (*knock.Manager, *serverFakeClock) {
 	t.Helper()
 	clock := &serverFakeClock{now: time.Now().UTC()}

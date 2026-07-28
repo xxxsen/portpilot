@@ -30,6 +30,34 @@ func TestPolicyDenyPrecedesAllow(t *testing.T) {
 	}
 }
 
+func TestPolicyPrivateOnlyAllowsLoopbackAndPrivateAddresses(t *testing.T) {
+	t.Parallel()
+	policy := Compile(config.AccessPolicyConfig{PrivateOnly: true})
+	for _, test := range []struct {
+		address string
+		allowed bool
+	}{
+		{address: "127.0.0.1", allowed: true},
+		{address: "10.0.0.1", allowed: true},
+		{address: "172.16.0.1", allowed: true},
+		{address: "192.168.0.1", allowed: true},
+		{address: "::1", allowed: true},
+		{address: "fd00::1", allowed: true},
+		{address: "100.64.0.1"},
+		{address: "169.254.1.1"},
+		{address: "8.8.8.8"},
+		{address: "2001:4860:4860::8888"},
+	} {
+		allowed, reason := policy.Decide(netip.MustParseAddr(test.address))
+		if allowed != test.allowed {
+			t.Errorf("%s allowed = %v, want %v", test.address, allowed, test.allowed)
+		}
+		if !test.allowed && reason != "private_only" {
+			t.Errorf("%s reason = %q", test.address, reason)
+		}
+	}
+}
+
 func TestNormalizeAddrUnmapsIPv4(t *testing.T) {
 	t.Parallel()
 	address, err := NormalizeAddr(&net.TCPAddr{

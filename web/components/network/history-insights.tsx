@@ -54,7 +54,8 @@ type Props = {
   onUnauthorized: () => void;
 };
 
-const chartMargin = {top: 18, right: 12, bottom: 8, left: 9};
+// Recharts draws left-axis ticks outside the axis box by tickSize (6px) + tickMargin (8px).
+const chartMargin = {top: 18, right: 12, bottom: 8, left: 16};
 const ranges: AnalyticsRangeSelection[] = ["1h", "24h", "7d", "30d", "90d", "custom"];
 const rangeSeconds: Partial<Record<AnalyticsRangeSelection, number>> = {
   "1h": 3600,

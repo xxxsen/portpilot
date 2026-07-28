@@ -1,5 +1,12 @@
 import type { Proxy } from "./types";
 
+export function parseCIDRLines(value: string): string[] {
+  return value
+    .split(/\r\n|[\n\r\u2028\u2029]/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function portOf(value: string, allowEmptyHost: boolean): number | null {
   const match = value.match(/^(?:\[[0-9a-fA-F:]+\]|[^:]*):([0-9]+)$/);
   if (!match) return null;
@@ -42,6 +49,9 @@ export function validateProxyDraft(
     return "UDP 代理不能启用 PROXY Protocol";
   }
   const access = draft.data.access_policy;
+  if (access?.private_only && (access.allow_cidrs.length > 0 || access.deny_cidrs.length > 0)) {
+    return "仅内网访问不能同时配置允许或拒绝来源 CIDR";
+  }
   for (const [label, values] of [
     ["允许来源", access?.allow_cidrs ?? []],
     ["拒绝来源", access?.deny_cidrs ?? []],

@@ -12,8 +12,9 @@ const (
 )
 
 type AccessPolicyConfig struct {
-	AllowCIDRs []string `json:"allow_cidrs"`
-	DenyCIDRs  []string `json:"deny_cidrs"`
+	PrivateOnly bool     `json:"private_only"`
+	AllowCIDRs  []string `json:"allow_cidrs"`
+	DenyCIDRs   []string `json:"deny_cidrs"`
 }
 
 type RateLimitConfig struct {
@@ -22,6 +23,9 @@ type RateLimitConfig struct {
 }
 
 func (p AccessPolicyConfig) Validate() error {
+	if p.PrivateOnly && (len(p.AllowCIDRs) > 0 || len(p.DenyCIDRs) > 0) {
+		return fmt.Errorf("private_only cannot be combined with allow_cidrs or deny_cidrs")
+	}
 	allow, err := validateCIDRList("allow_cidrs", p.AllowCIDRs)
 	if err != nil {
 		return err
