@@ -250,6 +250,10 @@ describe("NetworkPage", () => {
       expect(axis).toHaveAttribute("data-width", "78");
       expect(axis).toHaveAttribute("data-tick-margin", "8");
     }
+    expect(vi.mocked(api)).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/network\/analytics\/comparison\?range=24h&k=10/),
+      expect.anything(),
+    );
     expect(screen.queryByRole("heading", {name: "实时连接"})).not.toBeInTheDocument();
     expect(vi.mocked(api)).not.toHaveBeenCalledWith(
       expect.stringContaining("scope=active"),

@@ -362,9 +362,10 @@ func TestNetworkAnalyticsAPIIncludesMetadataAndHistoricalData(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("analytics overview status=%d body=%s", response.Code, response.Body.String())
 	}
-	var payload struct {
+	type analyticsOverviewPayload struct {
 		Range struct {
 			Requested         string `json:"requested"`
+			EffectiveTo       int64  `json:"effective_to"`
 			ResolutionSeconds int    `json:"resolution_seconds"`
 		} `json:"range"`
 		Completeness struct {
@@ -372,10 +373,12 @@ func TestNetworkAnalyticsAPIIncludesMetadataAndHistoricalData(t *testing.T) {
 			CompleteFrom int64  `json:"complete_from"`
 			GeoIPStatus  string `json:"geoip_status"`
 		} `json:"completeness"`
-		Connections int64 `json:"connections"`
-		UpBytes     int64 `json:"up_bytes"`
-		DownBytes   int64 `json:"down_bytes"`
+		Connections int64                        `json:"connections"`
+		UpBytes     int64                        `json:"up_bytes"`
+		DownBytes   int64                        `json:"down_bytes"`
+		Series      []store.AnalyticsSeriesPoint `json:"series"`
 	}
+	var payload analyticsOverviewPayload
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +388,7 @@ func TestNetworkAnalyticsAPIIncludesMetadataAndHistoricalData(t *testing.T) {
 		payload.Connections != 1 || payload.UpBytes != 1024 || payload.DownBytes != 2048 {
 		t.Fatalf("unexpected analytics response: %#v body=%s", payload, response.Body.String())
 	}
+	assertAnalyticsTrailingZero(t, payload.Range.EffectiveTo, payload.Range.ResolutionSeconds, payload.Series)
 
 	backfillFrom := now.Add(-24 * time.Hour).UnixMilli()
 	if err := database.UpdateAnalyticsMeta(
@@ -426,6 +430,25 @@ func TestNetworkAnalyticsAPIIncludesMetadataAndHistoricalData(t *testing.T) {
 		payload.Completeness.Status != "degraded" ||
 		payload.Completeness.CompleteFrom != backfillFrom {
 		t.Fatalf("degraded metadata response=%d payload=%#v", response.Code, payload.Completeness)
+	}
+}
+
+func assertAnalyticsTrailingZero(
+	t *testing.T,
+	effectiveTo int64,
+	resolutionSeconds int,
+	series []store.AnalyticsSeriesPoint,
+) {
+	t.Helper()
+	if len(series) == 0 {
+		t.Fatal("analytics response did not include series points")
+	}
+	last := series[len(series)-1]
+	expectedBucket := effectiveTo - int64(resolutionSeconds)*1000
+	if last.BucketAt != expectedBucket ||
+		last.Connections != 0 || last.Failures != 0 ||
+		last.UpBytes != 0 || last.DownBytes != 0 || last.EstimatedBytes != 0 {
+		t.Fatalf("analytics trailing bucket was not zero-filled: got=%#v want_bucket=%d", last, expectedBucket)
 	}
 }
 
@@ -562,21 +585,27 @@ func TestNetworkAnalyticsRangesStayBoundedAndAligned(t *testing.T) {
 		name       string
 		path       string
 		resolution int
+		points     int64
 	}{
-		{name: "one hour", path: "/?range=1h", resolution: 300},
-		{name: "one day", path: "/?range=24h", resolution: 3600},
-		{name: "one week", path: "/?range=7d", resolution: 21600},
-		{name: "one month", path: "/?range=30d", resolution: 86400},
-		{name: "ninety days", path: "/?range=90d", resolution: 86400},
+		{name: "one hour", path: "/?range=1h", resolution: 300, points: 12},
+		{name: "one day", path: "/?range=24h", resolution: 3600, points: 24},
+		{name: "one week", path: "/?range=7d", resolution: 21600, points: 28},
+		{name: "one month", path: "/?range=30d", resolution: 86400, points: 30},
+		{name: "ninety days", path: "/?range=90d", resolution: 86400, points: 90},
 	} {
 		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, test.path, nil)
 		value, err := app.analyticsRange(request)
 		if err != nil {
 			t.Fatalf("%s: %v", test.name, err)
 		}
+		resolutionMillis := int64(value.ResolutionSeconds) * 1000
+		points := (value.EffectiveTo - value.EffectiveFrom) / resolutionMillis
 		if value.ResolutionSeconds != test.resolution ||
 			value.EffectiveFrom >= value.EffectiveTo ||
-			(value.EffectiveTo-value.EffectiveFrom)/(int64(value.ResolutionSeconds)*1000) > 180 {
+			value.EffectiveFrom%resolutionMillis != 0 ||
+			value.EffectiveTo%resolutionMillis != 0 ||
+			points != test.points ||
+			points > 180 {
 			t.Fatalf("%s: unexpected range %#v", test.name, value)
 		}
 	}

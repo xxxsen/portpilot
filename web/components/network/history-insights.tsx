@@ -129,12 +129,14 @@ export function HistoryInsights(props: Props) {
     if (dimensionQuery.trim()) dimensionParams.set("query", dimensionQuery.trim());
     const topParams = new URLSearchParams(commonParams);
     topParams.set("k", String(topK));
+    const comparisonParams = new URLSearchParams(commonParams);
+    comparisonParams.set("k", String(topK));
     try {
       const [overviewResult, dimensionResult, rankingResult, comparisonResult] = await Promise.all([
         api<AnalyticsOverview>(`/api/network/analytics/overview?${commonParams}`, {signal: controller.signal}),
         api<DimensionsResponse>(`/api/network/analytics/dimensions?${dimensionParams}`, {signal: controller.signal}),
         api<AnalyticsTopIPs>(`/api/network/analytics/top-ips?${topParams}`, {signal: controller.signal}),
-        api<AnalyticsComparison>(`/api/network/analytics/comparison?`, {signal: controller.signal})
+        api<AnalyticsComparison>(`/api/network/analytics/comparison?${comparisonParams}`, {signal: controller.signal})
           .then((value) => ({value, failed: false}))
           .catch((caught) => {
             if (controller.signal.aborted || (caught instanceof Error && "status" in caught && caught.status === 401)) {

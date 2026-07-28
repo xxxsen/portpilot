@@ -379,8 +379,8 @@ func (a *App) analyticsRange(r *http.Request) (analyticsRange, error) {
 		if value.duration > a.Config.Duration(a.Config.Observability.NetworkStatisticsRetention) {
 			return analyticsRange{}, errInvalidAnalyticsRange
 		}
-		baseMillis := int64(value.base) * 1000
-		effectiveTo := ((now.UnixMilli() + baseMillis - 1) / baseMillis) * baseMillis
+		resolutionMillis := int64(value.resolution) * 1000
+		effectiveTo := alignTimestampUp(now.UnixMilli(), resolutionMillis)
 		return analyticsRange{
 			Requested: requested, EffectiveFrom: effectiveTo - value.duration.Milliseconds(),
 			EffectiveTo: effectiveTo, ResolutionSeconds: value.resolution, Timezone: "UTC",
@@ -406,7 +406,7 @@ func (a *App) analyticsRange(r *http.Request) (analyticsRange, error) {
 		base = store.AnalyticsFineResolutionSeconds
 	}
 	baseMillis := int64(base) * 1000
-	effectiveFrom := ((from + baseMillis - 1) / baseMillis) * baseMillis
+	effectiveFrom := alignTimestampUp(from, baseMillis)
 	effectiveTo := (to / baseMillis) * baseMillis
 	if effectiveFrom >= effectiveTo {
 		return analyticsRange{}, errInvalidAnalyticsRange
@@ -432,6 +432,10 @@ func analyticsOutputResolution(durationMillis int64, base int) int {
 		}
 	}
 	return 604800
+}
+
+func alignTimestampUp(value, interval int64) int64 {
+	return ((value + interval - 1) / interval) * interval
 }
 
 func validAnalyticsProxyID(value string) bool {

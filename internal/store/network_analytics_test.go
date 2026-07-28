@@ -107,6 +107,12 @@ func TestNetworkAnalyticsFinalizationIsHistoricalExactAndIdempotent(t *testing.T
 		fineOverview.Series[4].EstimatedBytes != 40 {
 		t.Fatalf("connection and traffic were assigned to the wrong buckets: %#v", fineOverview.Series)
 	}
+	for index, point := range fineOverview.Series[5:] {
+		if point.Connections != 0 || point.Failures != 0 ||
+			point.UpBytes != 0 || point.DownBytes != 0 || point.EstimatedBytes != 0 {
+			t.Fatalf("trailing bucket %d was not zero-filled: %#v", index+5, point)
+		}
+	}
 	top, err := database.NetworkAnalyticsTopIPs(t.Context(), AnalyticsQuery{
 		From: now, To: now + time.Hour.Milliseconds(),
 		BaseResolution: AnalyticsFineResolutionSeconds, OutputResolution: 3600,
