@@ -45,8 +45,9 @@ export function ProxyRuntimeDetail({
       <section className="runtime-group">
         <h3>连接策略</h3>
         <dl className="detail-grid">
-          <dt>允许来源</dt><dd className="mono">{policyValue(proxy?.data.access_policy?.allow_cidrs, "全部")}</dd>
-          <dt>拒绝来源</dt><dd className="mono">{policyValue(proxy?.data.access_policy?.deny_cidrs, "无")}</dd>
+          <dt>来源范围</dt><dd>{proxy?.data.access_policy?.private_only ? "仅内网访问" : "自定义 CIDR"}</dd>
+          <dt>允许来源</dt><dd className="mono">{proxy?.data.access_policy?.private_only ? "loopback / 私有网络" : policyValue(proxy?.data.access_policy?.allow_cidrs, "全部")}</dd>
+          <dt>拒绝来源</dt><dd className="mono">{proxy?.data.access_policy?.private_only ? "其他全部来源" : policyValue(proxy?.data.access_policy?.deny_cidrs, "无")}</dd>
           <dt>邮件临时授权</dt><dd>{proxy?.data.allow_knock_only ? "必须获得授权" : "不要求授权"}</dd>
           <dt>PROXY Protocol</dt><dd>{proxy?.data.enable_proxy_protocol ? "v1 已启用" : "关闭"}</dd>
           <dt>上行 / 下行限速</dt><dd>{rateLimitValue(proxy?.data.rate_limit)}</dd>

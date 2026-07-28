@@ -9,14 +9,16 @@ import (
 )
 
 type Policy struct {
-	allow []netip.Prefix
-	deny  []netip.Prefix
+	privateOnly bool
+	allow       []netip.Prefix
+	deny        []netip.Prefix
 }
 
 func Compile(value config.AccessPolicyConfig) Policy {
 	return Policy{
-		allow: parsePrefixes(value.AllowCIDRs),
-		deny:  parsePrefixes(value.DenyCIDRs),
+		privateOnly: value.PrivateOnly,
+		allow:       parsePrefixes(value.AllowCIDRs),
+		deny:        parsePrefixes(value.DenyCIDRs),
 	}
 }
 
@@ -32,6 +34,9 @@ func parsePrefixes(values []string) []netip.Prefix {
 }
 
 func (p Policy) Decide(address netip.Addr) (bool, string) {
+	if p.privateOnly && !address.IsLoopback() && !address.IsPrivate() {
+		return false, "private_only"
+	}
 	for _, prefix := range p.deny {
 		if prefix.Contains(address) {
 			return false, "deny"

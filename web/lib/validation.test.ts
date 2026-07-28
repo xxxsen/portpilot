@@ -44,6 +44,7 @@ describe("validateProxyDraft", () => {
   it("validates external CIDRs, rate limits, and PROXY protocol", () => {
     const valid = proxy("secured", "tcp", "auto", ":7200");
     valid.data.access_policy = {
+      private_only: false,
       allow_cidrs: ["192.0.2.0/24", "2001:db8::/32"],
       deny_cidrs: ["192.0.2.128/25"],
     };
@@ -57,6 +58,10 @@ describe("validateProxyDraft", () => {
     const badCIDR = structuredClone(valid);
     badCIDR.data.access_policy!.allow_cidrs = ["192.0.2.1/24"];
     expect(validateProxyDraft(badCIDR, [])).toContain("CIDR");
+
+    const conflictingPrivateOnly = structuredClone(valid);
+    conflictingPrivateOnly.data.access_policy!.private_only = true;
+    expect(validateProxyDraft(conflictingPrivateOnly, [])).toContain("仅内网");
 
     const badRate = structuredClone(valid);
     badRate.data.rate_limit!.up_bytes_per_second = 1023;

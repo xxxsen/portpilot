@@ -6,6 +6,7 @@ export type TunnelData = {
   enable_proxy_protocol?: boolean;
   allow_knock_only?: boolean;
   access_policy?: {
+    private_only?: boolean;
     allow_cidrs: string[];
     deny_cidrs: string[];
   };

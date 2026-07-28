@@ -18,7 +18,7 @@ vi.mock("recharts", () => ({
   LineChart: ({children, margin}: {
     children: ReactNode;
     margin?: {top?: number; right?: number; bottom?: number; left?: number};
-  }) => <div data-testid="line-chart" data-margin-top={margin?.top}>{children}</div>,
+  }) => <div data-testid="line-chart" data-margin-left={margin?.left} data-margin-top={margin?.top}>{children}</div>,
   CartesianGrid: () => null,
   Line: () => null,
   Tooltip: () => null,
@@ -243,6 +243,13 @@ describe("NetworkPage", () => {
 
     expect(await screen.findByRole("heading", {name: "历史指标"})).toBeInTheDocument();
     expect(screen.getAllByText("查看数据表")).toHaveLength(2);
+    for (const chart of screen.getAllByTestId("line-chart")) {
+      expect(chart).toHaveAttribute("data-margin-left", "16");
+    }
+    for (const axis of screen.getAllByTestId("y-axis")) {
+      expect(axis).toHaveAttribute("data-width", "78");
+      expect(axis).toHaveAttribute("data-tick-margin", "8");
+    }
     expect(screen.queryByRole("heading", {name: "实时连接"})).not.toBeInTheDocument();
     expect(vi.mocked(api)).not.toHaveBeenCalledWith(
       expect.stringContaining("scope=active"),

@@ -99,7 +99,8 @@ SQLite。
 
 代理编辑器提供三个稳定配置区：
 
-- 外部访问：代理级 canonical CIDR allow/deny，并只读展示服务端全局策略。
+- 外部访问：可选择“仅内网访问”或代理级 canonical CIDR allow/deny，并只读展示服务端全局
+  策略；仅内网模式会禁用 CIDR 输入框，保存时只持久化模式标记。
 - 目标来源传递：TCP 可开启 PROXY Protocol v1；UDP 固定关闭。
 - 连接限速：上行、下行分别配置不限速或 KiB/s、MiB/s、GiB/s。
 

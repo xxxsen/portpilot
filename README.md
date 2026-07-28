@@ -58,8 +58,8 @@ Makefile 和开发测试脚本优先使用 `.tools/go`，忽略外部 `GOROOT`�
 
 所有 JSON 使用严格解析，未知字段会导致启动失败。管理员密码必须是 bcrypt 哈希且 cost
 不低于 10；客户端 token 应由至少 32 字节随机数据生成。生产配置应限制为服务账号可读，
-按需配置动态代理端口的全局/代理外部来源 CIDR、邮件临时授权、每连接限速和 TCP PROXY
-Protocol v1。
+按需配置动态代理端口的全局/代理仅内网访问或外部来源 CIDR、邮件临时授权、每连接限速和
+TCP PROXY Protocol v1。
 
 服务端和客户端都支持相同的 `log_config`。省略时默认以 `debug` 级别输出到 console；生产
 环境可配置 `level`、`console`、`file`、`file_size`、`file_count` 和 `keep_days`。文件相对

@@ -145,6 +145,10 @@ td small { display: block; color: var(--muted); margin-top: 3px; }
 .toggle-setting { display: flex !important; grid-template-columns: minmax(0, 1fr) auto !important; align-items: center; gap: 18px !important; }
 .toggle-setting > span:first-child { display: grid; gap: 4px; }
 .toggle-setting small { color: var(--muted); font-weight: 400; }
+.access-mode-toggle { width: 100%; margin-top: 14px; padding: 12px; justify-content: space-between; border: 1px solid var(--line); border-radius: 5px; background: #f8fafb; }
+.access-mode-toggle.active { border-color: #a7d6ce; background: var(--accent-soft); }
+.cidr-grid.disabled label { color: var(--muted); }
+.cidr-grid textarea:disabled { cursor: not-allowed; border-color: var(--line); background: #f1f4f5; color: var(--muted); }
 .rate-editor { display: grid; gap: 10px; }
 .input-with-unit { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 7px; }
 .modal-actions { min-height: 68px; padding: 13px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; }
