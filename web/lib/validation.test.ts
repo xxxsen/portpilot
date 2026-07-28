@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Proxy } from "./types";
-import { validateProxyDraft } from "./validation";
+import { parseCIDRLines, validateProxyDraft } from "./validation";
 
 function proxy(id: string, network: "tcp" | "udp", transport: string, bind: string): Proxy {
   return {
@@ -13,6 +13,18 @@ function proxy(id: string, network: "tcp" | "udp", transport: string, bind: stri
 }
 
 describe("validateProxyDraft", () => {
+  it("parses CIDRs separated by common and Unicode line endings", () => {
+    expect(parseCIDRLines(
+      " 192.0.2.0/24\n2001:db8::/32\r\n198.51.100.0/24\r203.0.113.0/24\u2028192.0.2.128/25\u2029\n",
+    )).toEqual([
+      "192.0.2.0/24",
+      "2001:db8::/32",
+      "198.51.100.0/24",
+      "203.0.113.0/24",
+      "192.0.2.128/25",
+    ]);
+  });
+
   it("accepts all supported proxy transports", () => {
     expect(validateProxyDraft(proxy("tcp-smux", "tcp", "smux", ":7100"), [])).toBeNull();
     expect(validateProxyDraft(proxy("tcp-direct", "tcp", "direct", ":7101"), [])).toBeNull();

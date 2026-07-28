@@ -1,5 +1,12 @@
 import type { Proxy } from "./types";
 
+export function parseCIDRLines(value: string): string[] {
+  return value
+    .split(/\r\n|[\n\r\u2028\u2029]/u)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function portOf(value: string, allowEmptyHost: boolean): number | null {
   const match = value.match(/^(?:\[[0-9a-fA-F:]+\]|[^:]*):([0-9]+)$/);
   if (!match) return null;

@@ -345,7 +345,12 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await editor.getByLabel("承载").selectOption("smux");
     await editor.getByLabel("服务端监听").fill("127.0.0.1:7100");
     await editor.getByLabel("内网目标").fill("127.0.0.1:18080");
-    await editor.getByLabel("允许来源 CIDR").fill("127.0.0.0/8");
+    const allowCIDRs = editor.getByLabel("允许来源 CIDR");
+    await allowCIDRs.fill("127.0.0.0/8");
+    await allowCIDRs.press("End");
+    await allowCIDRs.press("Enter");
+    await allowCIDRs.pressSequentially("10.0.0.0/8");
+    await expect(allowCIDRs).toHaveValue("127.0.0.0/8\n10.0.0.0/8");
     await editor.getByLabel("拒绝来源 CIDR").fill("127.0.0.9/32");
     const proxyProtocolSetting = editor.locator("label.toggle-setting", {hasText: "启用 PROXY Protocol v1"});
     await proxyProtocolSetting.locator(".switch").click();
@@ -361,6 +366,7 @@ test("proxy CRUD validates drafts, rejects stale revisions, and records audit", 
     await securedRow.click();
     const runtimeDrawer = page.getByRole("dialog").filter({hasText: proxyIds[0]});
     await expect(runtimeDrawer).toContainText("127.0.0.0/8");
+    await expect(runtimeDrawer).toContainText("10.0.0.0/8");
     await expect(runtimeDrawer).toContainText("v1 已启用");
     await expect(runtimeDrawer).toContainText("64 KiB/s");
     await runtimeDrawer.getByRole("button", {name: "关闭"}).click();

@@ -23,7 +23,7 @@ import type {
   TunnelData,
 } from "@/lib/types";
 import {api, ApiError} from "@/lib/api";
-import {validateProxyDraft} from "@/lib/validation";
+import {parseCIDRLines, validateProxyDraft} from "@/lib/validation";
 import {AlertDialog, Dialog} from "@/components/ui/dialog";
 import {
   Availability,
@@ -455,6 +455,8 @@ function ProxyEditor({
   const [proxyID, setProxyID] = useState(proxy?.proxy_id ?? "");
   const [remark, setRemark] = useState(proxy?.remark ?? "");
   const [data, setData] = useState<TunnelData>(initial);
+  const [allowCIDRs, setAllowCIDRs] = useState(initial.access_policy?.allow_cidrs.join("\n") ?? "");
+  const [denyCIDRs, setDenyCIDRs] = useState(initial.access_policy?.deny_cidrs.join("\n") ?? "");
   const [validationError, setValidationError] = useState("");
   const selected = config.client_config.find((client) => client.client_id === clientID);
   return (
@@ -465,7 +467,19 @@ function ProxyEditor({
           setValidationError("请选择客户端");
           return;
         }
-        const draft: Proxy = {proxy_id: proxyID, remark, kind: "tunnel", enabled: proxy?.enabled ?? true, data};
+        const draft: Proxy = {
+          proxy_id: proxyID,
+          remark,
+          kind: "tunnel",
+          enabled: proxy?.enabled ?? true,
+          data: {
+            ...data,
+            access_policy: {
+              allow_cidrs: parseCIDRLines(allowCIDRs),
+              deny_cidrs: parseCIDRLines(denyCIDRs),
+            },
+          },
+        };
         const issue = validateProxyDraft(draft, config.client_config.flatMap((client) => client.proxy_list), proxy?.proxy_id);
         if (issue) {
           setValidationError(issue);
@@ -504,22 +518,16 @@ function ProxyEditor({
                 <textarea
                   className="mono"
                   placeholder="每行一个 CIDR；留空不增加限制"
-                  value={(data.access_policy?.allow_cidrs ?? []).join("\n")}
-                  onChange={(event) => setData({...data, access_policy: {
-                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
-                    allow_cidrs: cidrLines(event.target.value),
-                  }})}
+                  value={allowCIDRs}
+                  onChange={(event) => setAllowCIDRs(event.target.value)}
                 />
               </label>
               <label>拒绝来源 CIDR
                 <textarea
                   className="mono"
                   placeholder="每行一个 CIDR"
-                  value={(data.access_policy?.deny_cidrs ?? []).join("\n")}
-                  onChange={(event) => setData({...data, access_policy: {
-                    ...(data.access_policy ?? {allow_cidrs: [], deny_cidrs: []}),
-                    deny_cidrs: cidrLines(event.target.value),
-                  }})}
+                  value={denyCIDRs}
+                  onChange={(event) => setDenyCIDRs(event.target.value)}
                 />
               </label>
             </div>
@@ -612,10 +620,6 @@ function RateInput({label, value, onChange}: {label: string; value: number; onCh
       </label>
     </div>
   );
-}
-
-function cidrLines(value: string) {
-  return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
 function runtimeKey(clientID: string, proxyID: string) {
