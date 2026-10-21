@@ -130,10 +130,6 @@ func (a *App) recordExternalAccessDenied(
 	reason := decision.Reason
 	sourceIP := decision.SourceIP
 	a.access.observe(network, runtime.Proxy.ProxyID, reason, datagramBytes)
-	key := network + "\x00" + runtime.Proxy.ProxyID + "\x00" + sourceIP + "\x00" + reason
-	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
-		return
-	}
 	layer := "source"
 	reasonCode := reason
 	if value, rest, found := strings.Cut(reason, "_"); found {

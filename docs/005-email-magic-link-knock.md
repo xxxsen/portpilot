@@ -158,7 +158,8 @@ no-store` 和 `Referrer-Policy: no-referrer`。
 4. 若 `allow_knock_only=true`，检查内存中该 IP 的 grant。
 5. 通过后才允许创建 ticket、smux stream、direct 数据连接或 UDP flow。
 
-敲门 manager 不可用时受保护代理 fail closed。拒绝只写限频结构化日志和低基数指标，不写入
+敲门 manager 不可用时受保护代理 fail closed。每次拒绝均写 WARN 结构化日志并累计低基数指标，
+相同来源的重复拒绝也逐次记录，不限频或采样；UDP 每个被拒绝的 datagram 各记一条。不写入
 事件审计，以免高频探测冲掉管理记录。来源 ACL、限速、PROXY Protocol、smux/direct 选择和资源
 上限继续按原数据面契约执行。
 

@@ -15,22 +15,38 @@ import (
 
 func TestDataHandshakeLimiterRejectsExcessRequests(t *testing.T) {
 	t.Parallel()
-	app := &App{DataLimiter: auth.NewRateLimiter(1, time.Minute)}
+	core, observed := observer.New(zap.WarnLevel)
+	app := &App{
+		DataLimiter: auth.NewRateLimiter(1, time.Minute),
+		Logger:      zap.New(core),
+	}
 	first := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/portpilot/data/mux", nil)
 	first.RemoteAddr = "192.0.2.1:1234"
 	if !app.allowDataRequest(httptest.NewRecorder(), first) {
 		t.Fatal("first data handshake was limited")
 	}
-	response := httptest.NewRecorder()
-	if app.allowDataRequest(response, first) {
-		t.Fatal("excess data handshake was admitted")
+	for range 2 {
+		response := httptest.NewRecorder()
+		if app.allowDataRequest(response, first) {
+			t.Fatal("excess data handshake was admitted")
+		}
+		if response.Code != http.StatusTooManyRequests {
+			t.Fatalf("unexpected limited response: %d", response.Code)
+		}
 	}
-	if response.Code != http.StatusTooManyRequests {
-		t.Fatalf("unexpected limited response: %d", response.Code)
+	entries := observed.FilterMessage("security request rejected").All()
+	if len(entries) != 2 {
+		t.Fatalf("security log entries = %d, want 2", len(entries))
+	}
+	for _, entry := range entries {
+		fields := entry.ContextMap()
+		if fields["reason"] != "data_handshake_rate_limited" || fields["source_ip"] != "192.0.2.1" {
+			t.Fatalf("unexpected handshake rejection log: %#v", fields)
+		}
 	}
 }
 
-func TestRejectedDataTicketWritesStructuredLogOnly(t *testing.T) {
+func TestRejectedDataTicketLogsEveryRejectionWithoutAudit(t *testing.T) {
 	t.Parallel()
 	events, err := store.Open(":memory:", zap.NewNop())
 	if err != nil {
@@ -44,22 +60,26 @@ func TestRejectedDataTicketWritesStructuredLogOnly(t *testing.T) {
 	core, observed := observer.New(zap.WarnLevel)
 	app := &App{
 		Events: events, Tickets: auth.NewTicketStore(time.Minute),
-		Logger: zap.New(core), RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
+		Logger: zap.New(core),
 	}
 	manager := NewTunnelManager(app)
-	if _, ok := manager.Pair(t.Context(), protocol.StreamOpen{
-		ClientID: "client", SessionID: "session", SessionEpoch: 7,
-		ConnectionID: "connection", DataTicket: "invalid",
-	}, nil); ok {
-		t.Fatal("invalid ticket was accepted")
+	for range 2 {
+		if _, ok := manager.Pair(t.Context(), protocol.StreamOpen{
+			ClientID: "client", SessionID: "session", SessionEpoch: 7,
+			ConnectionID: "connection", DataTicket: "invalid",
+		}, nil); ok {
+			t.Fatal("invalid ticket was accepted")
+		}
 	}
 	entries := observed.FilterMessage("security request rejected").All()
-	if len(entries) != 1 {
-		t.Fatalf("security log entries = %d, want 1", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("security log entries = %d, want 2", len(entries))
 	}
-	fields := entries[0].ContextMap()
-	if fields["reason"] != "tcp_ticket_rejected" || fields["client_id"] != "client" {
-		t.Fatalf("unexpected security log context: %#v", fields)
+	for _, entry := range entries {
+		fields := entry.ContextMap()
+		if fields["reason"] != "tcp_ticket_rejected" || fields["client_id"] != "client" {
+			t.Fatalf("unexpected security log context: %#v", fields)
+		}
 	}
 	page, err := events.ListAudit(t.Context(), store.AuditQuery{Page: 1, PageSize: 25})
 	if err != nil {

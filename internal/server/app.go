@@ -25,33 +25,33 @@ import (
 )
 
 type App struct {
-	Config            config.ServerConfig
-	Cache             *cachelayout.Root
-	ConfigManager     *config.Manager
-	Sessions          *SessionManager
-	Tickets           *auth.TicketStore
-	Challenges        *auth.ChallengeStore
-	Tunnels           *TunnelManager
-	UDP               *UDPManager
-	Listeners         *ListenerManager
-	Events            *store.Store
-	Activity          *activity.Service
-	GeoIP             *geoip.Resolver
-	ProxyStatus       *ProxyStatusService
-	Attention         *AttentionService
-	Admin             *AdminAuth
-	ControlLimiter    *auth.RateLimiter
-	DataLimiter       *auth.RateLimiter
-	RuntimeLogLimiter *auth.RateLimiter
-	GlobalAccess      accesspolicy.Policy
-	Knock             *knock.Manager
-	KnockMailer       *mailer.Worker
-	Logger            *zap.Logger
+	Config         config.ServerConfig
+	Cache          *cachelayout.Root
+	ConfigManager  *config.Manager
+	Sessions       *SessionManager
+	Tickets        *auth.TicketStore
+	Challenges     *auth.ChallengeStore
+	Tunnels        *TunnelManager
+	UDP            *UDPManager
+	Listeners      *ListenerManager
+	Events         *store.Store
+	Activity       *activity.Service
+	GeoIP          *geoip.Resolver
+	ProxyStatus    *ProxyStatusService
+	Attention      *AttentionService
+	Admin          *AdminAuth
+	ControlLimiter *auth.RateLimiter
+	DataLimiter    *auth.RateLimiter
+	GlobalAccess   accesspolicy.Policy
+	Knock          *knock.Manager
+	KnockMailer    *mailer.Worker
+	Logger         *zap.Logger
 
-	adminServer *http.Server
-	dataServer  *http.Server
-	analytics   analyticsQueryMetrics
-	access      externalAccessMetrics
+	realIPLogLimiter *auth.RateLimiter
+	adminServer      *http.Server
+	dataServer       *http.Server
+	analytics        analyticsQueryMetrics
+	access           externalAccessMetrics
 
 	analyticsTimeout  time.Duration
 	storeError        atomic.Bool
@@ -132,15 +132,15 @@ func NewFromConfig(cfg config.ServerConfig, logger *zap.Logger) (*App, error) {
 	logger.Info("cache initialized", zap.String("cache_mode", cacheRoot.Mode()))
 	app := &App{
 		Config: cfg, ConfigManager: configManager, Cache: cacheRoot, Logger: logger,
-		Tickets:           auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
-		Challenges:        auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
-		Admin:             NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
-		ControlLimiter:    auth.NewRateLimiter(60, time.Minute),
-		DataLimiter:       auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
-		RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
-		GlobalAccess:      accesspolicy.Compile(cfg.AccessPolicy),
-		Knock:             knockManager,
-		KnockMailer:       knockMailer,
+		Tickets:          auth.NewTicketStore(cfg.Duration(cfg.Timeouts.DataConnect)),
+		Challenges:       auth.NewChallengeStore(cfg.Duration(cfg.Timeouts.ControlHandshake)),
+		Admin:            NewAdminAuth(cfg.Users, cfg.Limits.MaxAdminLoginAttemptsPerMinute),
+		ControlLimiter:   auth.NewRateLimiter(60, time.Minute),
+		DataLimiter:      auth.NewRateLimiter(cfg.Limits.MaxDataHandshakesPerMinute, time.Minute),
+		realIPLogLimiter: auth.NewRateLimiter(1, time.Minute),
+		GlobalAccess:     accesspolicy.Compile(cfg.AccessPolicy),
+		Knock:            knockManager,
+		KnockMailer:      knockMailer,
 	}
 	app.Sessions = NewSessionManager(app)
 	app.Tunnels = NewTunnelManager(app)
