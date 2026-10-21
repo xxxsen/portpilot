@@ -471,9 +471,9 @@ CIDR 模式的允许条件是来源不命中任意 deny，并满足每个非空 
 closed。TCP 在 activity、ticket 和信令创建前判定，UDP 在 flow 查找前对每个 datagram 判定。
 
 代理策略提交后，新请求立即使用新快照；不再允许的 pending/active TCP 和 UDP flow 以
-`source_policy_changed` 关闭，UDP 同时向客户端发送 `FLOW_CLOSE`。来源拒绝写结构化日志、
-并按 network/proxy/reason 写精确的进程聚合指标；重复日志按来源和规则限频，不写审计或
-为每次扫描创建连接明细。
+`source_policy_changed` 关闭，UDP 同时向客户端发送 `FLOW_CLOSE`。每次来源拒绝都写 WARN
+结构化日志，并按 network/proxy/reason 写精确的进程聚合指标；相同来源和规则的重复拒绝也
+逐次记录，不限频或采样。不写审计，也不为每次扫描创建连接明细。
 
 动态代理端口始终使用四层 socket peer，不读取 `real_ip_header`。
 
@@ -738,6 +738,10 @@ console 或 file 之一；日志文件的父目录由进程创建。客户端和
 
 生产环境建议使用 `info` 或更高级别，并由进程日志采集器接管 console；需要本地文件时再
 显式配置轮转。业务日志使用稳定消息和结构化字段，不通过字符串拼接承载上下文。
+
+外部来源策略拒绝（含敲门未授权）、运行态安全拒绝和 UDP datagram 丢弃均逐次写 WARN 日志，
+不因来源、客户端、代理或原因重复而限频或采样；UDP 每个被拒绝或丢弃的 datagram 各记一条。
+拒绝日志遵循 `log_config.level`，需要采集时应配置为 `warn`、`info` 或 `debug`。
 
 结构化日志可以包含：
 

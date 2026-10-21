@@ -645,11 +645,6 @@ func (m *UDPManager) recordDrop(runtime ProxyRuntime, source *net.UDPAddr, bytes
 	if source != nil {
 		sourceAddr = source.String()
 	}
-	key := "udp_drop\x00" + runtime.ClientID + "\x00" + runtime.Proxy.ProxyID +
-		"\x00" + sourceAddr + "\x00" + reason
-	if m.app.RuntimeLogLimiter != nil && !m.app.RuntimeLogLimiter.Allow(key) {
-		return
-	}
 	if m.app.Logger != nil {
 		m.app.Logger.Warn(
 			"UDP datagram dropped",

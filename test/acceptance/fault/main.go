@@ -108,7 +108,7 @@ func run() (runErr error) {
 		return err
 	}
 	defer first.close()
-	if err := replayChallenge(ctx, firstTrace); err != nil {
+	if err := testChallengeReplays(ctx, firstTrace); err != nil {
 		return err
 	}
 	second, _, err := authenticateControl(ctx, faultClient, faultToken)
@@ -146,9 +146,9 @@ func run() (runErr error) {
 	if err := testRefusedTarget(ctx); err != nil {
 		return err
 	}
-	if err := waitForRuntimeLogs(ctx, serverLog, logOffset, []string{
-		"client_auth_failed", "mux_ticket_rejected",
-		"tcp_ticket_rejected", "udp_ticket_rejected",
+	if err := waitForRuntimeLogs(ctx, serverLog, logOffset, map[string]int{
+		"client_auth_failed": 2, "mux_ticket_rejected": 2,
+		"tcp_ticket_rejected": 2, "udp_ticket_rejected": 2,
 	}); err != nil {
 		return err
 	}
@@ -288,6 +288,15 @@ func authenticateControl(ctx context.Context, clientID, token string) (*controlC
 		conn: conn, id: ok.SessionID, epoch: ok.SessionEpoch,
 		client: clientID, params: ok.DataPlane,
 	}, authTrace{challenge: challenge, signature: signature}, nil
+}
+
+func testChallengeReplays(ctx context.Context, trace authTrace) error {
+	for range 2 {
+		if err := replayChallenge(ctx, trace); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func replayChallenge(ctx context.Context, trace authTrace) error {
@@ -518,15 +527,17 @@ func testUDPChannelTicket(control *controlClient, mux *smux.Session) error {
 	if result.Type != "STREAM_OK" {
 		return fmt.Errorf("valid UDP ticket returned %s/%s", result.Type, result.Code)
 	}
-	replay, replayResult, err := openMuxStream(mux, open)
-	if replay != nil {
-		_ = replay.Close()
-	}
-	if err != nil {
-		return err
-	}
-	if replayResult.Type != "STREAM_ERROR" || replayResult.Code != protocol.ErrUDPChannelInvalid {
-		return fmt.Errorf("replayed UDP ticket returned %s/%s", replayResult.Type, replayResult.Code)
+	for range 2 {
+		replay, replayResult, err := openMuxStream(mux, open)
+		if replay != nil {
+			_ = replay.Close()
+		}
+		if err != nil {
+			return err
+		}
+		if replayResult.Type != "STREAM_ERROR" || replayResult.Code != protocol.ErrUDPChannelInvalid {
+			return fmt.Errorf("replayed UDP ticket returned %s/%s", replayResult.Type, replayResult.Code)
+		}
 	}
 	return nil
 }
@@ -654,7 +665,7 @@ func waitForRuntimeLogs(
 	ctx context.Context,
 	path string,
 	offset int64,
-	reasons []string,
+	minimumCounts map[string]int,
 ) error {
 	for {
 		file, err := os.Open(path) //nolint:gosec // The acceptance script supplies its own server log path.
@@ -678,18 +689,13 @@ func waitForRuntimeLogs(
 		if err != nil {
 			return err
 		}
-		found := make(map[string]bool, len(reasons))
-		for _, reason := range reasons {
-			if bytes.Contains(data, []byte(`"reason": "`+reason+`"`)) {
-				found[reason] = true
-			}
-		}
 		var missing []string
-		for _, reason := range reasons {
-			if !found[reason] {
-				missing = append(missing, reason)
+		for reason, minimum := range minimumCounts {
+			if count := bytes.Count(data, []byte(`"reason": "`+reason+`"`)); count < minimum {
+				missing = append(missing, fmt.Sprintf("%s (%d/%d)", reason, count, minimum))
 			}
 		}
+		slices.Sort(missing)
 		if len(missing) == 0 {
 			return nil
 		}

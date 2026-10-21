@@ -22,10 +22,6 @@ func (a *App) allowDataRequest(w http.ResponseWriter, r *http.Request) bool {
 func (a *App) recordSecurity(_ context.Context, clientID, reason string, metadata map[string]any) {
 	source, _ := metadata["source"].(string)
 	delete(metadata, "source")
-	key := "security\x00" + reason + "\x00" + clientID + "\x00" + source
-	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
-		return
-	}
 	if a.Logger == nil {
 		return
 	}

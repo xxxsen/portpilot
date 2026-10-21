@@ -723,7 +723,7 @@ func (a *App) requestSource(r *http.Request) string {
 
 func (a *App) logInvalidRealIPHeader(peer string) {
 	key := "invalid_real_ip_header\x00" + peer
-	if a.RuntimeLogLimiter != nil && !a.RuntimeLogLimiter.Allow(key) {
+	if a.realIPLogLimiter != nil && !a.realIPLogLimiter.Allow(key) {
 		return
 	}
 	if a.Logger != nil {

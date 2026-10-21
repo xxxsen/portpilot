@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/portpilot/portpilot/internal/accesspolicy"
-	"github.com/portpilot/portpilot/internal/auth"
 	"github.com/portpilot/portpilot/internal/config"
 	"github.com/portpilot/portpilot/internal/knock"
 	"github.com/portpilot/portpilot/internal/store"
@@ -140,8 +139,18 @@ func tcpAddress(source string) net.Addr {
 	return &net.TCPAddr{IP: net.ParseIP(source), Port: 1234}
 }
 
-func TestExternalAccessDeniedWritesRateLimitedLogAndExactMetricOnly(t *testing.T) {
+func TestExternalAccessDeniedLogsEveryRejectionAndExactMetricOnly(t *testing.T) {
 	t.Parallel()
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			t.Parallel()
+			testExternalAccessRejectionLogs(t, network)
+		})
+	}
+}
+
+func testExternalAccessRejectionLogs(t *testing.T, network string) {
+	t.Helper()
 	database, err := store.Open(":memory:", zap.NewNop())
 	if err != nil {
 		t.Fatal(err)
@@ -150,31 +159,41 @@ func TestExternalAccessDeniedWritesRateLimitedLogAndExactMetricOnly(t *testing.T
 	core, observed := observer.New(zap.WarnLevel)
 	app := &App{
 		Events: database, Logger: zap.New(core),
-		RuntimeLogLimiter: auth.NewRateLimiter(1, time.Minute),
-		GlobalAccess: accesspolicy.Compile(config.AccessPolicyConfig{
-			DenyCIDRs: []string{"192.0.2.0/24"},
-		}),
 	}
 	runtime := ProxyRuntime{
 		ClientID: "client-a",
 		Proxy:    config.ProxyEnvelope{ProxyID: "proxy-a"},
 	}
 	decision := externalAccessDecision{SourceIP: "192.0.2.10", Reason: "global_deny"}
-	app.recordExternalAccessDenied(runtime, "tcp", decision, 0)
-	app.recordExternalAccessDenied(runtime, "tcp", decision, 0)
+	datagramBytes := 0
+	if network == "udp" {
+		datagramBytes = 128
+	}
+	app.recordExternalAccessDenied(runtime, network, decision, datagramBytes)
+	app.recordExternalAccessDenied(runtime, network, decision, datagramBytes)
 
 	logs := observed.FilterMessage("external access denied").All()
-	if len(logs) != 1 {
-		t.Fatalf("external access logs = %d, want 1", len(logs))
+	if len(logs) != 2 {
+		t.Fatalf("external access logs = %d, want 2", len(logs))
 	}
-	fields := logs[0].ContextMap()
-	if fields["client_id"] != "client-a" || fields["proxy_id"] != "proxy-a" ||
-		fields["source_ip"] != "192.0.2.10" || fields["reason"] != "deny" {
-		t.Fatalf("unexpected external access log: %#v", fields)
+	for _, entry := range logs {
+		fields := entry.ContextMap()
+		if fields["network"] != network || fields["client_id"] != "client-a" || fields["proxy_id"] != "proxy-a" ||
+			fields["source_ip"] != "192.0.2.10" || fields["policy_layer"] != "global" || fields["reason"] != "deny" ||
+			fields["datagram_bytes"] != int64(datagramBytes) {
+			t.Fatalf("unexpected external access log: %#v", fields)
+		}
 	}
 	metrics := app.access.snapshot()
-	if len(metrics) != 1 || metrics[0].Connections != 2 {
-		t.Fatalf("external access metric lost denied connections: %#v", metrics)
+	if len(metrics) != 1 {
+		t.Fatalf("external access metrics = %#v, want one series", metrics)
+	}
+	metric := metrics[0]
+	if network == "tcp" && (metric.Connections != 2 || metric.Datagrams != 0 || metric.Bytes != 0) {
+		t.Fatalf("external access metric lost denied connections: %#v", metric)
+	}
+	if network == "udp" && (metric.Connections != 0 || metric.Datagrams != 2 || metric.Bytes != 256) {
+		t.Fatalf("external access metric lost denied datagrams: %#v", metric)
 	}
 	page, err := database.ListAudit(t.Context(), store.AuditQuery{Page: 1, PageSize: 25})
 	if err != nil {
