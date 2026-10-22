@@ -25,7 +25,7 @@ flowchart LR
 Server 使用 host 网络的原因是代理监听端口由管理员动态创建，Docker bridge 无法预先枚举并
 发布所有端口。`3000`、`5100` 和 `6100` 应只允许本机或受保护的内部网络访问。
 
-以下命令以 Docker、宿主机 Nginx 和版本 `v0.0.16` 为例。升级部署时将版本变量替换为目标
+以下命令以 Docker、宿主机 Nginx 和版本 `v0.0.17` 为例。升级部署时将版本变量替换为目标
 [Release](https://github.com/xxxsen/portpilot/releases)。
 
 从 `v0.0.16` 起，Server 和 Client 镜像使用 `golang:1.26.10-alpine` 编译，包含针对 eMudhra 中间 CA 私钥泄露
@@ -33,10 +33,15 @@ Server 使用 host 网络的原因是代理监听端口由管理员动态创建�
 该修复编译在 Go 二进制中，旧镜像必须重新构建并替换正在运行的容器；仅更新宿主机 CA
 证书包或重启旧容器不会更新其 Go 证书校验逻辑。自行编译时应使用 Go 1.26.10 或更新的安全版本。
 
+从 `v0.0.17` 起，Web 镜像使用 `node:24.22.1-alpine`，包含 CVE-2026-111497 的 Brotli 解码器修复。
+此前基于 Node.js 20.19.2 构建的 Web 镜像必须重新构建并替换容器；重启旧容器或仅升级 npm
+依赖不会替换其 Node.js 运行时。影响范围与核查依据见
+[CVE-2026-111497 核查记录](007-cve-2026-111497.md)。
+
 ## 2. 准备目录
 
 ```bash
-export PORTPILOT_VERSION=v0.0.16
+export PORTPILOT_VERSION=v0.0.17
 export PORTPILOT_ROOT=/opt/portpilot
 
 sudo install -d -m 0750 \
@@ -214,7 +219,7 @@ sudo systemctl reload nginx
 在内网机器重新声明版本和目录并准备配置目录：
 
 ```bash
-export PORTPILOT_VERSION=v0.0.16
+export PORTPILOT_VERSION=v0.0.17
 export PORTPILOT_ROOT=/opt/portpilot
 
 sudo install -d -m 0750 "${PORTPILOT_ROOT}/client"

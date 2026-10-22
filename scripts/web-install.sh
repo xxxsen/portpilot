@@ -6,6 +6,8 @@ WEB_DIR="${ROOT}/web"
 CACHE_DIR="${ROOT}/.cache"
 HASH_FILE="${CACHE_DIR}/web-package-lock.sha256"
 
+"${ROOT}/scripts/check-node.sh"
+
 mkdir -p "${CACHE_DIR}"
 current_hash="$(sha256sum "${WEB_DIR}/package-lock.json" | awk '{print $1}')"
 if [[ -d "${WEB_DIR}/node_modules" && -f "${HASH_FILE}" && "$(cat "${HASH_FILE}")" == "${current_hash}" ]]; then
