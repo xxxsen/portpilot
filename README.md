@@ -87,10 +87,10 @@ PortPilot 发布三张 Docker Hub 镜像。生产环境应固定到明确版本�
 | Client | [`xxxsen/portpilot-client`](https://hub.docker.com/r/xxxsen/portpilot-client) |
 | Web | [`xxxsen/portpilot-web`](https://hub.docker.com/r/xxxsen/portpilot-web) |
 
-例如拉取 `v0.0.16`：
+例如拉取 `v0.0.17`：
 
 ```bash
-export PORTPILOT_VERSION=v0.0.16
+export PORTPILOT_VERSION=v0.0.17
 docker pull "xxxsen/portpilot-server:${PORTPILOT_VERSION}"
 docker pull "xxxsen/portpilot-client:${PORTPILOT_VERSION}"
 docker pull "xxxsen/portpilot-web:${PORTPILOT_VERSION}"
