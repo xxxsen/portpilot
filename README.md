@@ -56,7 +56,7 @@ flowchart LR
 
 ## 快速体验
 
-本地开发环境需要 Go 1.26、Node.js 20、npm、curl、jq 和 `ss`：
+本地开发环境需要 Go 1.26、Node.js 24.22.1 或更新的 24.x 安全版本、npm、curl、jq 和 `ss`：
 
 ```bash
 git clone https://github.com/xxxsen/portpilot.git
@@ -197,6 +197,7 @@ portpilot-client run --config /etc/portpilot/client.json
 | [运行洞察](docs/004-operational-insights-and-navigation.md) | 运行状态、搜索、对比、导出和缓存布局 |
 | [邮件临时授权](docs/005-email-magic-link-knock.md) | SMTP、Magic Link、授权生命周期和安全边界 |
 | [生产部署](docs/006-production-deployment.md) | Docker、Nginx、权限、启动、升级和排障 |
+| [CVE-2026-111497](docs/007-cve-2026-111497.md) | Web Node.js/Brotli 影响范围与运行时升级 |
 
 ## 开发与贡献
 

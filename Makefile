@@ -65,7 +65,7 @@ doctor: ## Check development tools and local ports
 	@command -v sha256sum >/dev/null
 	@command -v tar >/dev/null
 	@"$(GO)" env GOVERSION | grep -Eq "^go1\.26\."
-	@node --version | grep -Eq "^v20\."
+	@"$(PROJECT_ROOT)/scripts/check-node.sh"
 	@for tool in golangci-lint gofumpt goimports shfmt shellcheck hadolint; do \
 		test -x "$(PROJECT_ROOT)/bin/$${tool}" || { echo "Missing pinned tool bin/$${tool}; run make bootstrap" >&2; exit 1; }; \
 	done
